@@ -1,0 +1,19 @@
+services:
+  mediagarrd-client:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    container_name: mediagarrd-client
+    environment:
+      - CLIENT_PORT=8081
+      - CLIENT_PICKUP_INTERVAL=PT1H
+      - CLIENT_DOWNLOAD_DIRECTORY=/var/lib/mediagarrd/downloads
+      - CLIENT_STATE_FILE=/var/lib/mediagarrd/client/state.json
+      - MEDIAGARRD_SERVER_PORT=38471
+      - MEDIAGARRD_SERVER_IP=192.168.50.55
+    ports:
+      - "8081:8081"
+    volumes:
+      - "./data/client/downloads:/var/lib/mediagarrd/downloads"
+      - "./data/client:/var/lib/mediagarrd/client"
+    restart: unless-stopped
