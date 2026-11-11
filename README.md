@@ -44,4 +44,4 @@ docker compose up --build -d
 Downloaded backups and the client state live in the mounted `./data/client` volumes and are kept.
 
 ## License
-[GPLv3](./LICENSE)
+[MIT](./LICENSE)
