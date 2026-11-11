@@ -1,0 +1,55 @@
+name: Handle duplicate status label
+
+on:
+  issues:
+    types: [labeled, unlabeled]
+
+jobs:
+  correct-status-labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure one Status label per issue
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.MEDIAGARRD_CLIENT_ACTIONS_TOKEN }}
+          script: |
+            const issueNumber = context.payload.issue.number;
+            const statusLabelsToCheck = [
+              "Status: Needs Triage",
+              "Status: Approved",
+              "Status: Waiting on Child Issues",
+              "Status: Waiting on Server Update"
+            ];
+
+            const existingLabels = context.payload.issue.labels.map(label => label.name);
+            const existingStatusLabels = existingLabels.filter(label => statusLabelsToCheck.includes(label));
+            const addedLabel = context.payload.action === "labeled" ? context.payload.label.name : null;
+
+            let keep = null;
+            if (statusLabelsToCheck.includes(addedLabel)) {
+              keep = addedLabel;
+            } else if (existingStatusLabels.length == 1) {
+              keep = existingStatusLabels[0];
+            }
+
+            for (const label of existingStatusLabels.filter(label => label !== keep)) {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                name: label
+              });
+              console.log(`Removed label "${label}" from issue #${issueNumber}`);
+            }
+
+            if (keep) {
+              console.log(`Status label: "${keep}" is set correctly`);
+            } else {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: ["Status: Needs Triage"]
+              });
+            }
+

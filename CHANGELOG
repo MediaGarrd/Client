@@ -1,0 +1,26 @@
+# CHANGELOG
+
+## 10-26-26
+- Finished renaming the codebase to MediaGarrd
+- Added issue templates, issue label and pull request workflows, and integration test workflows
+- Added a `Makefile` with a `test` target
+- Removed `install.sh`: `docker-compose.example.yml` now works as-is, the container keeps its downloads and state on the mounted volumes by default, and everything else is set from the web page
+- `MEDIAGARRD_SERVER_PORT` now defaults to `38471` to match the server, and `MEDIAGARRD_SERVER_IP` is optional and accepts `<ip>:<port>`
+- The client connects to `MEDIAGARRD_SERVER_IP` on its own at startup and keeps trying every 30 seconds until a server is selected, so scheduled pickups work without opening the web page
+- Added a Server Config view, opened from the toggle in the top bar, that changes the connected server's backup location, interval, and retention count and adds, edits, and removes its services
+- Split the web page into an HTML page, a stylesheet, and JavaScript modules
+- Every API endpoint now returns errors as `{"error": "..."}`, passing on the server's own message and status code when the server rejects a request
+- Fixed the server schedule being sent as a number of seconds instead of an ISO-8601 duration
+- The Gradle wrapper is now committed so the project builds without a local Gradle install
+- Network discovery finishes in a couple of seconds instead of minutes: it checks for an open port before making an HTTP request, probes many hosts at once, skips Docker and VPN interfaces, and only counts servers that answer with a MediaGarrd health response
+- Connecting by IP accepts `host:port`, stops right away when the host is unreachable, and scans every port of a reachable host in about a second
+- Fixed the connection badge being overwritten by the periodic health check while a scan or connection attempt is running
+- The badge and status panel show when the selected server is not responding, the backup list says why it could not be loaded, and everything reloads on its own when the server comes back
+- The backup list reloads when a backup run started elsewhere finishes, and the Dashboard shows saved server settings as soon as you switch back to it
+- "Scan Local Network" reports how many servers the scan actually found
+- Requests to the server now time out instead of hanging when it is unreachable, and health checks pause while the page is hidden
+- Starting a download of a backup that is already downloading reuses the running download instead of writing the same file twice
+- Unknown backups and download tasks return 404, invalid pickup intervals and server URLs return 400, and finished download tasks are forgotten after 10 minutes
+- Backup file names from the server can no longer write outside the download directory
+- The client state file is written atomically so a crash cannot leave it half written
+- Removed unused code and dependencies

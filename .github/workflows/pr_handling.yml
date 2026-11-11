@@ -1,0 +1,46 @@
+name: Require approved issue
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  require-approved-issue:
+    if: github.head_ref != 'dev'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Ensure every linked issue is approved
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { repository } = await github.graphql(`
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    closingIssuesReferences(first: 25) {
+                      nodes { number labels(first: 25) { nodes { name } } }
+                    }
+                  }
+                }
+              }`, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              number: context.payload.pull_request.number
+            });
+
+            const issues = repository.pullRequest.closingIssuesReferences.nodes;
+            if (issues.length === 0) {
+              core.setFailed("Link the approved issue this pull request resolves, e.g. \"Closes #12\" in the description");
+              return;
+            }
+
+            const unapproved = issues.filter(issue => !issue.labels.nodes.some(label => label.name === "Status: Approved"));
+            if (unapproved.length > 0) {
+              core.setFailed(`Linked issues without "Status: Approved": ${unapproved.map(issue => `#${issue.number}`).join(", ")}`);
+              return;
+            }
+
+            console.log(`All linked issues are approved: ${issues.map(issue => `#${issue.number}`).join(", ")}`);
