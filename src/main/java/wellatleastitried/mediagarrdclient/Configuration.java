@@ -12,6 +12,10 @@ public class Configuration {
     private Duration pickupInterval = Duration.ofHours(12);
     private int serverPort = 38471;
     private String preferredServerIp = "";
+    private String updateRepository = "MediaGarrd/Client";
+    private String githubApiBaseUrl = "https://api.github.com";
+    private Duration updateCheckInterval = Duration.ofHours(24);
+    private Duration backupRunTimeout = Duration.ofHours(6);
 
     public String getStateFile() {
         return stateFile;
@@ -51,5 +55,37 @@ public class Configuration {
 
     public void setPreferredServerIp(String preferredServerIp) {
         this.preferredServerIp = preferredServerIp;
+    }
+
+    public String getUpdateRepository() {
+        return updateRepository;
+    }
+
+    public void setUpdateRepository(String updateRepository) {
+        this.updateRepository = updateRepository;
+    }
+
+    public String getGithubApiBaseUrl() {
+        return githubApiBaseUrl;
+    }
+
+    public void setGithubApiBaseUrl(String githubApiBaseUrl) {
+        this.githubApiBaseUrl = githubApiBaseUrl;
+    }
+
+    public Duration getUpdateCheckInterval() {
+        return updateCheckInterval;
+    }
+
+    public void setUpdateCheckInterval(Duration updateCheckInterval) {
+        this.updateCheckInterval = updateCheckInterval;
+    }
+
+    public Duration getBackupRunTimeout() {
+        return backupRunTimeout;
+    }
+
+    public void setBackupRunTimeout(Duration backupRunTimeout) {
+        this.backupRunTimeout = backupRunTimeout;
     }
 }

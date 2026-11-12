@@ -1,7 +1,5 @@
 package wellatleastitried.mediagarrdclient.api;
 
-import java.net.SocketTimeoutException;
-import java.net.http.HttpTimeoutException;
 import java.util.Map;
 import java.util.Objects;
 
@@ -16,6 +14,9 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientResponseException;
 import org.springframework.web.server.ResponseStatusException;
+
+import wellatleastitried.mediagarrdclient.service.BackupRunTimeoutException;
+import wellatleastitried.mediagarrdclient.service.RequestTimeouts;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
@@ -38,12 +39,20 @@ public class ApiExceptionHandler {
         return error(e.getStatusCode(), reason);
     }
 
+    @ExceptionHandler(BackupRunTimeoutException.class)
+    public ResponseEntity<Map<String, String>> backupRunTimedOut(BackupRunTimeoutException e) {
+        LOGGER.warn("Backup run timed out: {}", e.getMessage());
+        return error(HttpStatus.GATEWAY_TIMEOUT, e.getMessage());
+    }
+
     @ExceptionHandler(ResourceAccessException.class)
     public ResponseEntity<Map<String, String>> serverUnreachable(ResourceAccessException e) {
+        if (RequestTimeouts.isTimeout(e)) {
+            LOGGER.warn("MediaGarrd server did not respond in time: {}", e.getMessage());
+            return error(HttpStatus.GATEWAY_TIMEOUT, "MediaGarrd server did not respond in time");
+        }
         LOGGER.warn("MediaGarrd server unreachable: {}", e.getMessage());
-        return e.getCause() instanceof HttpTimeoutException || e.getCause() instanceof SocketTimeoutException
-            ? error(HttpStatus.GATEWAY_TIMEOUT, "MediaGarrd server did not respond in time")
-            : error(HttpStatus.BAD_GATEWAY, "MediaGarrd server is unreachable");
+        return error(HttpStatus.BAD_GATEWAY, "MediaGarrd server is unreachable");
     }
 
     @ExceptionHandler(ResponseStatusException.class)

@@ -1,7 +1,7 @@
 import { api } from './api.js';
-import { formatInterval } from './format.js';
+import { linkView, planKnown } from './view-model.js';
 
-export function initConnection({ root, statusPanel, badge }, notify, { onServerChanged, onHealth, onStatus }) {
+export function initConnection({ root, statusPanel, badge }, notify, { resync }) {
   const ipForm = root.querySelector('[data-ip-form]');
   const known = root.querySelector('[data-known]');
   const controls = root.querySelectorAll('button, input, select');
@@ -9,59 +9,53 @@ export function initConnection({ root, statusPanel, badge }, notify, { onServerC
   const scanNote = root.querySelector('[data-scan-note]');
   const details = statusPanel.querySelector('[data-details]');
   const noServer = statusPanel.querySelector('[data-no-server]');
-  const state = statusPanel.querySelector('[data-state]');
+  const degraded = statusPanel.querySelector('[data-degraded]');
+  const runState = statusPanel.querySelector('[data-state]');
   let busy = false;
-  let connected = null;
-  let healthRequest = null;
+  let latest = null;
+  let renderedFor;
+  let deferred = false;
 
   function setBadge(kind, label) {
     badge.className = `conn-badge ${kind}`;
     badge.querySelector('[data-label]').textContent = label;
   }
 
-  function renderHealth(health) {
-    details.hidden = !health.connected;
-    noServer.hidden = health.connected;
-    if (!health.connected) {
-      noServer.textContent = health.activeServer ? `${health.activeServer} is not responding.` : 'No server connected.';
-      if (!busy) setBadge(health.activeServer ? 'down' : '', health.activeServer ? 'Unreachable' : 'Not Connected');
-      return;
+  function renderKnown(state) {
+    const plan = planKnown({
+      shown: [...known.options].map((option) => option.value),
+      knownServers: state.knownServers,
+      activeServer: state.activeServer,
+      selected: known.value,
+      focused: document.activeElement === known,
+      switched: renderedFor !== undefined && renderedFor !== state.activeServer,
+    });
+    deferred = plan.action === 'defer';
+    if (plan.action === 'defer') return;
+    renderedFor = state.activeServer;
+    if (plan.action === 'keep') return;
+    const options = plan.values[0] === ''
+      ? [new Option('— none discovered yet —', '')]
+      : plan.values.map((server) => new Option(server, server, false, server === plan.selected));
+    known.replaceChildren(...options);
+  }
+
+  function render(state) {
+    latest = state;
+    const view = linkView(state);
+    details.hidden = !view.showDetails;
+    noServer.hidden = view.showDetails;
+    noServer.textContent = view.message;
+    degraded.hidden = !view.degraded;
+    if (view.showDetails) {
+      statusPanel.querySelector('[data-url]').textContent = view.url;
+      statusPanel.querySelector('[data-interval]').textContent = view.interval;
+      statusPanel.querySelector('[data-retention]').textContent = view.retention;
+      runState.textContent = view.running ? 'Running' : 'Idle';
+      runState.classList.toggle('running', view.running);
     }
-    const server = health.serverStatus;
-    statusPanel.querySelector('[data-url]').textContent = health.activeServer;
-    statusPanel.querySelector('[data-interval]').textContent = server ? formatInterval(server.backupInterval) : '—';
-    statusPanel.querySelector('[data-retention]').textContent = server ? `${server.backupRetentionCount} archives` : '—';
-    state.textContent = server?.running ? 'Running' : 'Idle';
-    state.classList.toggle('running', Boolean(server?.running));
-    if (!busy) setBadge('ok', health.activeServer.replace(/^https?:\/\//, ''));
-  }
-
-  function refreshHealth() {
-    healthRequest ??= api.serverHealth()
-      .catch(() => ({ connected: false }))
-      .then((health) => {
-        const reconnected = health.connected && connected === false;
-        connected = health.connected;
-        renderHealth(health);
-        onHealth(health);
-        if (reconnected) onServerChanged();
-      })
-      .finally(() => { healthRequest = null; });
-    return healthRequest;
-  }
-
-  function renderKnown(status) {
-    const servers = status.knownServers || [];
-    const options = servers.map((server) => new Option(server, server, false, server === status.activeServer));
-    known.replaceChildren(...(options.length ? options : [new Option('— none discovered yet —', '')]));
-  }
-
-  async function refreshStatus() {
-    const status = await api.status();
-    renderKnown(status);
-    onStatus(status);
-    await healthRequest;
-    await refreshHealth();
+    if (!busy) setBadge(view.badge.kind, view.badge.label);
+    if (state.loaded) renderKnown(state);
   }
 
   async function connect(label, action) {
@@ -80,9 +74,8 @@ export function initConnection({ root, statusPanel, badge }, notify, { onServerC
     busy = false;
     scanBar.classList.remove('active');
     controls.forEach((control) => { control.disabled = false; });
-    connected = null;
-    await refreshStatus().catch(notify.error);
-    if (result) onServerChanged();
+    if (latest) render(latest);
+    await resync();
     return result;
   }
 
@@ -111,5 +104,9 @@ export function initConnection({ root, statusPanel, badge }, notify, { onServerC
     scanNote.textContent = found ? `Last scan: found ${count} server${count === 1 ? '' : 's'}.` : 'Last scan: failed.';
   });
 
-  return { refreshStatus, refreshHealth };
+  known.addEventListener('blur', () => {
+    if (deferred && latest) renderKnown(latest);
+  });
+
+  return { render };
 }

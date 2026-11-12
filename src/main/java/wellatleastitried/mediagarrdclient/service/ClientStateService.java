@@ -8,7 +8,10 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Consumer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,6 +37,8 @@ public class ClientStateService {
     private final Path statePath;
     private final ObjectMapper mapper;
     private final Set<String> knownServers = new LinkedHashSet<>();
+    private final List<Consumer<String>> activeServerListeners = new CopyOnWriteArrayList<>();
+    private final List<Runnable> knownServersListeners = new CopyOnWriteArrayList<>();
     private String activeServer;
     private Duration pickupInterval;
 
@@ -64,25 +69,110 @@ public class ClientStateService {
         return List.copyOf(knownServers);
     }
 
-    public synchronized void updateKnownServers(List<String> servers) {
-        knownServers.clear();
-        knownServers.addAll(servers);
-        if (isBlank(activeServer)) {
-            activeServer = knownServers.stream().findFirst().orElse(null);
-        } else {
-            knownServers.add(activeServer);
+    public void updateKnownServers(List<String> servers) {
+        String before = null;
+        String after = null;
+        List<String> listBefore = null;
+        List<String> listAfter = null;
+        try {
+            synchronized (this) {
+                before = activeServer;
+                listBefore = List.copyOf(knownServers);
+                knownServers.clear();
+                knownServers.addAll(servers);
+                if (isBlank(activeServer)) {
+                    activeServer = knownServers.stream().findFirst().orElse(null);
+                } else {
+                    knownServers.add(activeServer);
+                }
+                after = activeServer;
+                listAfter = List.copyOf(knownServers);
+                LOGGER.info("Known servers updated: {}, active server: {}", knownServers, activeServer);
+                save();
+            }
+        } finally {
+            if (!Objects.equals(before, after)) {
+                notifyActiveServerListeners(after);
+            }
+            if (listBefore != null && !listBefore.equals(listAfter)) {
+                notifyKnownServersListeners();
+            }
         }
-        LOGGER.info("Known servers updated: {}, active server: {}", knownServers, activeServer);
-        save();
     }
 
-    public synchronized void setActiveServer(String serverUrl) {
-        LOGGER.info("Active server changed: {} -> {}", activeServer, serverUrl);
-        activeServer = serverUrl;
-        if (!isBlank(serverUrl)) {
-            knownServers.add(serverUrl);
+    public void setActiveServer(String serverUrl) {
+        boolean changed = false;
+        boolean listChanged = false;
+        try {
+            synchronized (this) {
+                LOGGER.info("Active server changed: {} -> {}", activeServer, serverUrl);
+                changed = !Objects.equals(activeServer, serverUrl);
+                activeServer = serverUrl;
+                if (!isBlank(serverUrl)) {
+                    listChanged = knownServers.add(serverUrl);
+                }
+                save();
+            }
+        } finally {
+            if (changed) {
+                notifyActiveServerListeners(serverUrl);
+            }
+            if (listChanged) {
+                notifyKnownServersListeners();
+            }
         }
-        save();
+    }
+
+    public void setActiveServerIfBlank(String serverUrl) {
+        boolean changed = false;
+        boolean listChanged = false;
+        try {
+            synchronized (this) {
+                if (!isBlank(activeServer) || isBlank(serverUrl)) {
+                    return;
+                }
+                LOGGER.info("Active server changed: {} -> {}", activeServer, serverUrl);
+                activeServer = serverUrl;
+                changed = true;
+                listChanged = knownServers.add(serverUrl);
+                save();
+            }
+        } finally {
+            if (changed) {
+                notifyActiveServerListeners(serverUrl);
+            }
+            if (listChanged) {
+                notifyKnownServersListeners();
+            }
+        }
+    }
+
+    public void addActiveServerListener(Consumer<String> listener) {
+        activeServerListeners.add(listener);
+    }
+
+    public void addKnownServersListener(Runnable listener) {
+        knownServersListeners.add(listener);
+    }
+
+    private void notifyKnownServersListeners() {
+        for (Runnable listener : knownServersListeners) {
+            try {
+                listener.run();
+            } catch (RuntimeException e) {
+                LOGGER.warn("Known servers listener failed: {}", e.getMessage());
+            }
+        }
+    }
+
+    private void notifyActiveServerListeners(String serverUrl) {
+        for (Consumer<String> listener : activeServerListeners) {
+            try {
+                listener.accept(serverUrl);
+            } catch (RuntimeException e) {
+                LOGGER.warn("Active server listener failed: {}", e.getMessage());
+            }
+        }
     }
 
     public synchronized Duration setPickupInterval(Duration interval) {

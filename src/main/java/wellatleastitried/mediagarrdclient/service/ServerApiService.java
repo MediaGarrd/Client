@@ -18,18 +18,22 @@ import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.util.UriUtils;
 
+import wellatleastitried.mediagarrdclient.Configuration;
 import wellatleastitried.mediagarrdclient.api.Endpoints;
 import wellatleastitried.mediagarrdclient.dto.BackupDto;
 import wellatleastitried.mediagarrdclient.dto.ServerConfigDto;
 import wellatleastitried.mediagarrdclient.dto.ServerStatusDto;
 import wellatleastitried.mediagarrdclient.dto.ServiceDto;
+import wellatleastitried.mediagarrdclient.dto.VersionStatusDto;
 
 @Service
 public class ServerApiService {
@@ -44,6 +48,7 @@ public class ServerApiService {
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(3);
     private static final Duration HEALTH_TIMEOUT = Duration.ofSeconds(5);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
+    static final Duration MIN_BACKUP_RUN_TIMEOUT = Duration.ofMinutes(1);
     private static final int BUFFER_SIZE = 64 * 1024;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -52,7 +57,25 @@ public class ServerApiService {
         .build();
     private final RestClient healthClient = restClient(HEALTH_TIMEOUT);
     private final RestClient restClient = restClient(REQUEST_TIMEOUT);
-    private final RestClient backupRunClient = restClient(null);
+    private final RestClient backupRunClient;
+    private final Duration backupRunTimeout;
+
+    @Autowired
+    public ServerApiService(Configuration properties) {
+        this(checked(properties.getBackupRunTimeout()));
+    }
+
+    private static Duration checked(Duration backupRunTimeout) {
+        if (backupRunTimeout == null || backupRunTimeout.compareTo(MIN_BACKUP_RUN_TIMEOUT) < 0) {
+            throw new IllegalStateException("mediagarrd.client.backup-run-timeout must be at least " + MIN_BACKUP_RUN_TIMEOUT + ", was " + backupRunTimeout);
+        }
+        return backupRunTimeout;
+    }
+
+    ServerApiService(Duration backupRunTimeout) {
+        this.backupRunTimeout = backupRunTimeout;
+        this.backupRunClient = restClient(backupRunTimeout);
+    }
 
     private RestClient restClient(Duration readTimeout) {
         JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
@@ -71,6 +94,13 @@ public class ServerApiService {
         return status;
     }
 
+    public VersionStatusDto serverVersion(String serverUrl) {
+        return healthClient.get()
+            .uri(serverUrl + Endpoints.SERVER_VERSION.getPath())
+            .retrieve()
+            .body(VersionStatusDto.class);
+    }
+
     public List<BackupDto> listBackups(String serverUrl) {
         List<BackupDto> backups = restClient.get()
             .uri(serverUrl + Endpoints.SERVER_BACKUPS.getPath())
@@ -82,10 +112,19 @@ public class ServerApiService {
 
     public void triggerBackup(String serverUrl) {
         LOGGER.info("Triggering backup on {}", serverUrl);
-        backupRunClient.post()
-            .uri(serverUrl + Endpoints.SERVER_BACKUP_RUN.getPath())
-            .retrieve()
-            .toBodilessEntity();
+        try {
+            backupRunClient.post()
+                .uri(serverUrl + Endpoints.SERVER_BACKUP_RUN.getPath())
+                .retrieve()
+                .toBodilessEntity();
+        } catch (ResourceAccessException e) {
+            if (RequestTimeouts.isReadTimeout(e)) {
+                LOGGER.warn("Backup on {} did not finish within {}", serverUrl, backupRunTimeout);
+                throw new BackupRunTimeoutException("The backup did not finish within " + backupRunTimeout
+                    + " and is probably still running on the server. The dashboard's live status shows when it finishes.", e);
+            }
+            throw e;
+        }
         LOGGER.info("Backup finished on {}", serverUrl);
     }
 
