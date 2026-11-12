@@ -24,12 +24,19 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -53,6 +60,10 @@ public class ServerDiscoveryService {
     private static final int MAX_CONCURRENT_PROBES = 256;
     private static final Duration CONNECT_TIMEOUT = Duration.ofMillis(500);
     private static final Duration HEALTH_TIMEOUT = Duration.ofSeconds(2);
+    static final Duration PREFERRED_ATTEMPT_DEADLINE = Duration.ofSeconds(3);
+    private static final int ATTEMPT_PENDING = 0;
+    private static final int ATTEMPT_RUNNING = 1;
+    private static final int ATTEMPT_ABANDONED = 2;
     private static final Duration SCAN_DEADLINE = Duration.ofSeconds(20);
 
     enum Probe { OPEN, REFUSED, UNREACHABLE }
@@ -79,20 +90,64 @@ public class ServerDiscoveryService {
         .connectTimeout(CONNECT_TIMEOUT.multipliedBy(2))
         .followRedirects(HttpClient.Redirect.NEVER)
         .build();
-    private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService executor;
+    private final Duration preferredDeadline;
+    private final AtomicBoolean preferredAttempt = new AtomicBoolean();
     private final Semaphore probeSlots = new Semaphore(MAX_CONCURRENT_PROBES);
 
+    @Autowired
     public ServerDiscoveryService(Configuration configuration, ClientStateService stateService, ObjectMapper mapper) {
+        this(configuration, stateService, mapper, Executors.newVirtualThreadPerTaskExecutor(), PREFERRED_ATTEMPT_DEADLINE);
+    }
+
+    ServerDiscoveryService(Configuration configuration, ClientStateService stateService, ObjectMapper mapper, ExecutorService executor, Duration preferredDeadline) {
+        this.executor = executor;
+        this.preferredDeadline = preferredDeadline;
         this.configuration = configuration;
         this.stateService = stateService;
         this.mapper = mapper;
     }
 
-    @Scheduled(fixedDelay = 30_000)
+    @Scheduled(initialDelay = 1_000, fixedDelay = 4_000)
     public void connectPreferredServer() {
         String active = stateService.getActiveServer();
-        if (active == null || active.isBlank()) {
-            resolvePreferredServer().ifPresent(stateService::setActiveServer);
+        if ((active != null && !active.isBlank()) || !preferredAttempt.compareAndSet(false, true)) {
+            return;
+        }
+        AtomicInteger phase = new AtomicInteger(ATTEMPT_PENDING);
+        Future<Optional<String>> attempt;
+        try {
+            attempt = executor.submit(() -> {
+                if (!phase.compareAndSet(ATTEMPT_PENDING, ATTEMPT_RUNNING)) {
+                    return Optional.<String>empty();
+                }
+                try {
+                    return resolvePreferredServer();
+                } finally {
+                    preferredAttempt.set(false);
+                }
+            });
+        } catch (RuntimeException e) {
+            preferredAttempt.set(false);
+            return;
+        }
+        try {
+            attempt.get(preferredDeadline.toMillis(), TimeUnit.MILLISECONDS).ifPresent(stateService::setActiveServerIfBlank);
+        } catch (TimeoutException e) {
+            abandon(attempt, phase);
+            LOGGER.debug("Resolving the preferred server took longer than {} ms, retrying on the next tick", preferredDeadline.toMillis());
+        } catch (ExecutionException e) {
+            LOGGER.debug("Resolving the preferred server failed: {}", e.getCause() == null ? e.getMessage() : e.getCause().getMessage());
+        } catch (InterruptedException e) {
+            abandon(attempt, phase);
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void abandon(Future<?> attempt, AtomicInteger phase) {
+        attempt.cancel(true);
+        if (phase.compareAndSet(ATTEMPT_PENDING, ATTEMPT_ABANDONED)) {
+            preferredAttempt.set(false);
         }
     }
 

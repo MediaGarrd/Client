@@ -3,7 +3,7 @@ import { bytes, percent, relativeTime } from './format.js';
 
 const POLL_INTERVAL_MS = 350;
 
-export function initBackups({ root, actions }, notify, { refreshHealth }) {
+export function initBackups({ root, actions }, notify) {
   const rows = root.querySelector('tbody');
   const empty = root.querySelector('[data-empty]');
   const headers = root.querySelectorAll('th[data-sort-key]');
@@ -18,6 +18,7 @@ export function initBackups({ root, actions }, notify, { refreshHealth }) {
   let runInFlight = false;
   let latestTask = null;
   let pollTimer = null;
+  let latestRequest = 0;
 
   function renderActions() {
     const backupBusy = serverRunning || runInFlight;
@@ -82,10 +83,14 @@ export function initBackups({ root, actions }, notify, { refreshHealth }) {
   }
 
   async function refresh() {
+    const request = ++latestRequest;
     try {
-      backups = await api.listBackups() || [];
+      const loaded = await api.listBackups() || [];
+      if (request !== latestRequest) return;
+      backups = loaded;
       renderTable();
     } catch (error) {
+      if (request !== latestRequest) return;
       backups = [];
       renderTable(`${error.message}. Connect to a server to view archives.`);
     }
@@ -166,12 +171,11 @@ export function initBackups({ root, actions }, notify, { refreshHealth }) {
     renderActions();
     try {
       await api.runBackup();
-      await refresh();
     } catch (error) {
       notify.error(error);
     } finally {
       runInFlight = false;
-      await refreshHealth();
+      renderActions();
     }
   });
 
@@ -196,11 +200,15 @@ export function initBackups({ root, actions }, notify, { refreshHealth }) {
 
   return {
     refresh,
+    rerender: () => renderTable(),
+    clear() {
+      latestRequest++;
+      backups = [];
+      renderTable('No backups loaded. Connect to a server to view archives.');
+    },
     setServerRunning(running) {
-      const finished = serverRunning && !running;
       serverRunning = running;
       renderActions();
-      if (finished) refresh();
     },
   };
 }

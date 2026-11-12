@@ -1,8 +1,10 @@
 package wellatleastitried.mediagarrdclient.api;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -25,9 +27,15 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import org.springframework.web.server.ResponseStatusException;
 
 import wellatleastitried.mediagarrdclient.dto.BackupDto;
+import wellatleastitried.mediagarrdclient.dto.DashboardState;
+import wellatleastitried.mediagarrdclient.dto.HealthSummary;
+import wellatleastitried.mediagarrdclient.dto.LinkState;
 import wellatleastitried.mediagarrdclient.dto.PickupStartDto;
+import wellatleastitried.mediagarrdclient.dto.VersionsDto;
 import wellatleastitried.mediagarrdclient.service.BackupPickupService;
 import wellatleastitried.mediagarrdclient.service.ClientStateService;
+import wellatleastitried.mediagarrdclient.service.DashboardService;
+import wellatleastitried.mediagarrdclient.service.BackupRunTimeoutException;
 import wellatleastitried.mediagarrdclient.service.ServerApiService;
 import wellatleastitried.mediagarrdclient.service.ServerDiscoveryService;
 
@@ -48,6 +56,20 @@ class ClientControllerTest {
 
     @MockBean
     BackupPickupService backupPickupService;
+
+    @MockBean
+    DashboardService dashboardService;
+
+    @Test
+    void mapsABackupRunTimeoutToAGatewayTimeoutWithAnErrorBody() throws Exception {
+        when(stateService.requireActiveServer()).thenReturn("http://server:8080");
+        doThrow(new BackupRunTimeoutException("The backup is probably still running on the server.", null))
+            .when(serverApiService).triggerBackup("http://server:8080");
+
+        mockMvc.perform(post("/api/client/backups/run"))
+            .andExpect(status().isGatewayTimeout())
+            .andExpect(jsonPath("$.error").value("The backup is probably still running on the server."));
+    }
 
     @Test
     void statusEndpointReturnsState() throws Exception {
@@ -106,10 +128,32 @@ class ClientControllerTest {
     }
 
     @Test
-    void statusConnectsThePreferredServerFirst() throws Exception {
+    void statusHasNoNetworkSideEffect() throws Exception {
         mockMvc.perform(get("/api/client/status")).andExpect(status().isOk());
 
-        verify(discoveryService).connectPreferredServer();
+        verifyNoInteractions(discoveryService, serverApiService);
+    }
+
+    @Test
+    void dashboardEndpointReturnsTheStoredStateWithoutContactingTheServer() throws Exception {
+        when(dashboardService.state()).thenReturn(new DashboardState(
+            "http://server:8080",
+            List.of("http://server:8080"),
+            LinkState.DEGRADED,
+            true,
+            new HealthSummary(Duration.ofHours(6), 5),
+            new VersionsDto(null, null)));
+
+        mockMvc.perform(get("/api/client/dashboard"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.activeServer").value("http://server:8080"))
+            .andExpect(jsonPath("$.knownServers[0]").value("http://server:8080"))
+            .andExpect(jsonPath("$.link").value("DEGRADED"))
+            .andExpect(jsonPath("$.running").value(true))
+            .andExpect(jsonPath("$.health.backupRetentionCount").value(5))
+            .andExpect(jsonPath("$.versions.server").doesNotExist());
+
+        verifyNoInteractions(serverApiService, discoveryService);
     }
 
     @Test
