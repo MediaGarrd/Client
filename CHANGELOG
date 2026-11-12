@@ -1,0 +1,45 @@
+# CHANGELOG
+
+## 11-12-26
+- The client now owns the dashboard state (active and known servers, link state, run state, the server's backup interval and retention, both versions) and pushes it to every open page on `GET /api/client/events`: one `snapshot` on subscribe, then `link`, `state`, `run-started`, `run-finished`, `servers`, `config`, `backups-changed`, `versions` and `ping`. `GET /api/client/dashboard` returns the same snapshot
+- Link states: `LIVE` (the server's event stream is open), `DEGRADED` (no stream, because of an older server, the subscriber cap or a backoff, but the server answers its health check), `CONNECTING` (a server was just selected or its stream dropped and the first health check has not answered) and `DOWN` (no server, or the health check failed). While not `LIVE`, the client checks the server's health every 8 seconds, once per client instead of once per open page
+- Pages no longer poll the server. Status, Backup Archives and Versions are driven by pushes, and the one-minute refresh only re-reads the client's stored state
+- The Backup Archives table reloads when a run finishes, when the server announces `backups-changed` (archive deleted or backup location changed), when the connected server changes, and when the link comes back; on tab return or view return only if a server is connected and its link is up. While `DEGRADED` the client lists the server's archives once a minute and pushes `backups-changed` itself
+- The client refetches the server's health on its `config-changed` event, so schedule and retention changes made elsewhere show up at once
+- Versions: the client pushes its own update check result when it changes. The server's version is fetched when the link comes up (not again within 5 minutes of a good answer, unless the server was down) or the server changes, then at most hourly; it is asked again after 30 seconds if the server has not checked yet, 5 minutes after a server error and 10 minutes when unavailable. The Versions panel needs no recheck timer, and the server row reads "Unable to check" once the first check fails
+- The page shows "Client unreachable" instead of "No server connected" when the client itself cannot be reached. Renewing the live connection does not trigger it: the page waits 8 seconds for the reconnect first. The Server Status panel says when live updates are unavailable from the server
+- The Known Servers list updates on every open Dashboard the moment the client's list changes, including background discovery, and leaves a selection you are making alone. The Pickup Interval field is filled on the first successful load and never changed by pushes or refreshes
+- When the connected server changes, including in the background, the Dashboard reloads at once, including the Server Config form
+- Moved the Versions panel below the Backup Archives panel
+- The event stream sends a `retry: 5000` hint and answers 503 with an empty body when 32 browsers are already subscribed
+- `GET /api/client/status` no longer probes for the preferred server; background discovery does that, retrying every 4 seconds while no server is selected
+- Removed the unused `GET /api/client/server-health` and `GET /api/client/versions`
+- "Run Backup Now" now gives up waiting after `CLIENT_BACKUP_RUN_TIMEOUT` (default `PT6H`) instead of holding a request open forever; the client answers 504 saying the backup is probably still running on the server, and the dashboard still shows when it finishes
+- Added a small `node --test` suite for the page's decision logic; `make test` runs it
+
+## 11-11-26
+- The client knows its own version (`0.1.0`) and checks GitHub for the latest release of `MediaGarrd/Client` shortly after starting and then once a day. `MEDIAGARRD_UPDATE_REPOSITORY`, `MEDIAGARRD_GITHUB_API_URL` and `MEDIAGARRD_UPDATE_CHECK_INTERVAL` change the repository, API address and interval; the interval must be at least `PT1H` or the client refuses to start
+- Added a Versions panel to the Dashboard with a Server row and a Client row: "Up-to-date" when current, a red box with a link to the latest release when an update is available, muted when the check could not be made or no server is connected. The server's version comes from its `GET /api/v1/version`
+- The Dashboard refreshes every minute while open and visible (Backup Archives, Known Servers without disturbing a selection, Versions from the stored status without contacting GitHub); the Pickup Interval field is never touched
+- The client keeps one connection to the server's `GET /api/v1/events` and relays it on the new `GET /api/client/events` (`state`, `run-started`, `run-finished`, `ping`, and `link` for the stream's status). The Server Status "State" and the backup buttons switch to Running and back to Idle at once, and Backup Archives reloads when a run finishes
+- The client resubscribes when the connected server changes, reconnects after a failure with a delay growing from 1 to 30 seconds, and reconnects when the stream is quiet for 45 seconds. A server without `/api/v1/events` is retried every 5 minutes and polled meanwhile
+- The browser closes the live connection while the tab is hidden and reopens it on return; at most 32 browsers can subscribe
+- A health check started before a live event no longer overwrites it with older information, and a slow Backup Archives reload no longer overwrites a newer one
+- Scheduled tasks run on two threads, so a slow GitHub check cannot delay discovery or pickups
+
+## 10-26-26
+- Finished renaming the codebase to MediaGarrd; removed unused code and dependencies
+- Added issue templates, issue label and pull request workflows, integration test workflows, and a `Makefile` with a `test` target. The Gradle wrapper is now committed
+- Removed `install.sh`: `docker-compose.example.yml` works as-is, downloads and state stay on the mounted volumes by default, and everything else is set from the web page
+- `MEDIAGARRD_SERVER_PORT` defaults to `38471` to match the server; `MEDIAGARRD_SERVER_IP` is optional and accepts `<ip>:<port>`. The client connects to it at startup and retries every 30 seconds until a server is selected, so scheduled pickups work without opening the page
+- Added a Server Config view, opened from the toggle in the top bar, to change the connected server's backup location, interval and retention count and to add, edit and remove its services
+- Split the web page into an HTML page, a stylesheet and JavaScript modules
+- Every API endpoint returns errors as `{"error": "..."}`, passing on the server's own message and status code when it rejects a request. Unknown backups and download tasks return 404, invalid pickup intervals and server URLs return 400, and finished download tasks are forgotten after 10 minutes
+- Fixed the server schedule being sent as seconds instead of an ISO-8601 duration
+- Network discovery finishes in a couple of seconds: it checks for an open port before any HTTP request, probes many hosts at once, skips Docker and VPN interfaces, and counts only servers that answer with a MediaGarrd health response. "Scan Local Network" reports how many it found
+- Connecting by IP accepts `host:port`, stops at once when the host is unreachable, and scans every port of a reachable host in about a second
+- The badge and status panel show when the selected server is not responding, the backup list says why it could not load, and everything reloads when the server returns. The connection badge is no longer overwritten by the health check during a scan or connection attempt
+- The backup list reloads when a run started elsewhere finishes, and the Dashboard shows saved server settings as soon as you switch back to it
+- Requests to the server time out instead of hanging, and health checks pause while the page is hidden
+- Starting a download of a backup that is already downloading reuses the running download
+- Backup file names from the server can no longer write outside the download directory, and the client state file is written atomically
