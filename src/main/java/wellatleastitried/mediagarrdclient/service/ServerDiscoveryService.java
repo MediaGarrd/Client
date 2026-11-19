@@ -1,6 +1,7 @@
 package wellatleastitried.mediagarrdclient.service;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.ConnectException;
 import java.net.Inet4Address;
 import java.net.InetAddress;
@@ -40,12 +41,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 import jakarta.annotation.PreDestroy;
-import wellatleastitried.mediagarrdclient.Configuration;
-import wellatleastitried.mediagarrdclient.api.Endpoints;
+import wellatleastitried.mediagarrdclient.MediaGarrdProperties;
+import wellatleastitried.mediagarrdclient.protocol.Endpoints;
 
 @Service
 public class ServerDiscoveryService {
@@ -57,7 +59,9 @@ public class ServerDiscoveryService {
     private static final int MIN_SCAN_PREFIX_LENGTH = 24;
     private static final int FIRST_UNPRIVILEGED_PORT = 1024;
     private static final int MAX_PORT = 65535;
+    private static final int HTTPS_PORT = 443;
     private static final int MAX_CONCURRENT_PROBES = 256;
+    private static final int MAX_PROBE_BODY = 16 * 1024;
     private static final Duration CONNECT_TIMEOUT = Duration.ofMillis(500);
     private static final Duration HEALTH_TIMEOUT = Duration.ofSeconds(2);
     static final Duration PREFERRED_ATTEMPT_DEADLINE = Duration.ofSeconds(3);
@@ -68,13 +72,22 @@ public class ServerDiscoveryService {
 
     enum Probe { OPEN, REFUSED, UNREACHABLE }
 
-    record Candidate(String host, InetAddress address, int port) {
+    record Candidate(String scheme, String host, InetAddress address, int port) {
+        Candidate(String host, InetAddress address, int port) {
+            this("http", host, address, port);
+        }
+
         String url() {
-            return "http://" + (host.contains(":") ? "[" + host + "]" : host) + ":" + port;
+            String authority = host.contains(":") ? "[" + host + "]" : host;
+            boolean defaultPort = "https".equals(scheme) && port == HTTPS_PORT;
+            return scheme + "://" + authority + (defaultPort ? "" : ":" + port);
         }
     }
 
-    record HostInput(String host, Integer port) {
+    record HostInput(String scheme, String host, Integer port) {
+        boolean https() {
+            return "https".equals(scheme);
+        }
     }
 
     private record ProbeResult(Probe probe, String server) {
@@ -83,24 +96,26 @@ public class ServerDiscoveryService {
     private record QuickResult(Optional<String> server, boolean hostAlive) {
     }
 
-    private final Configuration configuration;
+    private final MediaGarrdProperties configuration;
     private final ClientStateService stateService;
     private final ObjectMapper mapper;
-    private final HttpClient httpClient = HttpClient.newBuilder()
-        .connectTimeout(CONNECT_TIMEOUT.multipliedBy(2))
-        .followRedirects(HttpClient.Redirect.NEVER)
-        .build();
+    private final HttpClient httpClient;
     private final ExecutorService executor;
     private final Duration preferredDeadline;
     private final AtomicBoolean preferredAttempt = new AtomicBoolean();
     private final Semaphore probeSlots = new Semaphore(MAX_CONCURRENT_PROBES);
 
     @Autowired
-    public ServerDiscoveryService(Configuration configuration, ClientStateService stateService, ObjectMapper mapper) {
-        this(configuration, stateService, mapper, Executors.newVirtualThreadPerTaskExecutor(), PREFERRED_ATTEMPT_DEADLINE);
+    public ServerDiscoveryService(MediaGarrdProperties configuration, ClientStateService stateService, ObjectMapper mapper, ServerTls tls) {
+        this(configuration, stateService, mapper, tls, Executors.newVirtualThreadPerTaskExecutor(), PREFERRED_ATTEMPT_DEADLINE);
     }
 
-    ServerDiscoveryService(Configuration configuration, ClientStateService stateService, ObjectMapper mapper, ExecutorService executor, Duration preferredDeadline) {
+    ServerDiscoveryService(MediaGarrdProperties configuration, ClientStateService stateService, ObjectMapper mapper, ServerTls tls, ExecutorService executor, Duration preferredDeadline) {
+        this.httpClient = HttpClient.newBuilder()
+            .connectTimeout(CONNECT_TIMEOUT.multipliedBy(2))
+            .followRedirects(HttpClient.Redirect.NEVER)
+            .sslContext(tls.context())
+            .build();
         this.executor = executor;
         this.preferredDeadline = preferredDeadline;
         this.configuration = configuration;
@@ -175,7 +190,24 @@ public class ServerDiscoveryService {
         }
         HostInput input = parseHost(preferred);
         InetAddress address = input == null ? null : resolve(input.host());
-        return address == null ? Optional.empty() : quickResolve(input.host(), address, input.port(), deadline()).server();
+        if (address == null) {
+            return Optional.empty();
+        }
+        if (input.https()) {
+            return probeSecure(input, input.port());
+        }
+        return quickResolve(input.host(), address, input.port(), deadline()).server();
+    }
+
+    private Optional<String> probeSecure(HostInput input, Integer port) {
+        Candidate candidate = new Candidate("https", input.host(), null, port != null ? port : HTTPS_PORT);
+        boolean found = isMediaGarrdServer(candidate);
+        if (found) {
+            LOGGER.info("Resolved MediaGarrd server at {}", candidate.url());
+        } else {
+            LOGGER.debug("No MediaGarrd server answered at {}", candidate.url());
+        }
+        return found ? Optional.of(candidate.url()) : Optional.empty();
     }
 
     public Optional<String> resolveServerByIp(String input, Integer port) {
@@ -186,6 +218,9 @@ public class ServerDiscoveryService {
             return Optional.empty();
         }
         Integer preferredPort = port != null ? port : parsed.port();
+        if (parsed.https()) {
+            return probeSecure(parsed, preferredPort);
+        }
         long deadline = deadline();
         QuickResult quick = quickResolve(parsed.host(), address, preferredPort, deadline);
         if (quick.server().isPresent() || !quick.hostAlive()) {
@@ -257,22 +292,37 @@ public class ServerDiscoveryService {
     }
 
     boolean isMediaGarrdServer(Candidate candidate) {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(candidate.url() + Endpoints.SERVER_HEALTH.getPath()))
-            .timeout(HEALTH_TIMEOUT)
-            .GET()
-            .build();
+        return isMediaGarrdServer(candidate.url());
+    }
+
+    public boolean isMediaGarrdServer(String serverUrl) {
+        HttpRequest request;
         try {
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200) {
-                return false;
+            request = HttpRequest.newBuilder(URI.create(serverUrl + Endpoints.SERVER_HEALTH.getPath()))
+                .timeout(HEALTH_TIMEOUT)
+                .GET()
+                .build();
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+        try {
+            HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            try (InputStream body = response.body()) {
+                if (response.statusCode() != 200) {
+                    return false;
+                }
+                byte[] bytes = body.readNBytes(MAX_PROBE_BODY + 1);
+                if (bytes.length > MAX_PROBE_BODY) {
+                    return false;
+                }
+                JsonNode health = mapper.readTree(bytes);
+                return health.path("healthy").isBoolean() && health.has("backupInterval");
             }
-            JsonNode health = mapper.readTree(response.body());
-            return health.path("healthy").isBoolean() && health.has("backupInterval");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
-        } catch (IOException | IllegalArgumentException e) {
-            LOGGER.debug("{} is not a MediaGarrd server: {}", candidate.url(), e.getMessage());
+        } catch (IOException | IllegalArgumentException | JacksonException e) {
+            LOGGER.debug("{} is not a MediaGarrd server: {}", serverUrl, e.getMessage());
             return false;
         }
     }
@@ -332,7 +382,8 @@ public class ServerDiscoveryService {
                 return null;
             }
             String host = uri.getHost().startsWith("[") ? uri.getHost().substring(1, uri.getHost().length() - 1) : uri.getHost();
-            return new HostInput(host, uri.getPort() > 0 ? uri.getPort() : null);
+            String scheme = "https".equalsIgnoreCase(uri.getScheme()) ? "https" : "http";
+            return new HostInput(scheme, host, uri.getPort() > 0 ? uri.getPort() : null);
         } catch (IllegalArgumentException e) {
             return null;
         }

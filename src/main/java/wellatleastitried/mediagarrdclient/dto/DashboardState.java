@@ -8,6 +8,7 @@ public record DashboardState(
     LinkState link,
     Boolean running,
     HealthSummary health,
-    VersionsDto versions
+    VersionsDto versions,
+    PairingState pairing
 ) {
 }

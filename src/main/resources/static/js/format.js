@@ -6,7 +6,30 @@ export function seconds(duration) {
   return Number(hours) * 3600 + Number(minutes) * 60 + Number(secs);
 }
 
-export const toDuration = (minutes) => `PT${Math.round(minutes)}M`;
+export function toDuration(minutes) {
+  const total = Math.round(minutes * 60);
+  return total % 60 === 0 ? `PT${total / 60}M` : `PT${total}S`;
+}
+
+export const MIN_INTERVAL_SECONDS = 900;
+export const MAX_INTERVAL_SECONDS = 31536000;
+export const INTERVAL_MESSAGE = 'Backup interval must be between 15 minutes and 365 days';
+
+export function intervalProblem(hours) {
+  const total = Math.round(hours * 3600);
+  const valid = Number.isFinite(total) && total >= MIN_INTERVAL_SECONDS && total <= MAX_INTERVAL_SECONDS;
+  return valid ? null : INTERVAL_MESSAGE;
+}
+
+export const MAX_PICKUP_MINUTES = 525600;
+export const PICKUP_MESSAGE = 'Pickup interval must be between 1 minute and 365 days (525600 minutes)';
+
+export function pickupProblem(minutes) {
+  const valid = Number.isFinite(minutes) && minutes >= 1 && minutes <= MAX_PICKUP_MINUTES;
+  return valid ? null : PICKUP_MESSAGE;
+}
+
+export const toHours = (duration) => Number((seconds(duration) / 3600).toFixed(4));
 
 export function formatInterval(duration) {
   const total = seconds(duration);
@@ -30,7 +53,9 @@ export function bytes(size) {
 }
 
 export function relativeTime(iso) {
-  const elapsed = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  const time = new Date(iso).getTime();
+  if (!Number.isFinite(time)) return '—';
+  const elapsed = Math.max(0, Math.floor((Date.now() - time) / 1000));
   if (elapsed < 60) return `${elapsed}s ago`;
   const minutes = Math.floor(elapsed / 60);
   if (minutes < 60) return `${minutes}m ago`;

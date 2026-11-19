@@ -1,6 +1,5 @@
 package wellatleastitried.mediagarrdclient.api;
 
-import java.net.URI;
 import java.util.List;
 
 import org.springframework.web.bind.annotation.GetMapping;
@@ -23,6 +22,7 @@ import wellatleastitried.mediagarrdclient.service.ClientStateService;
 import wellatleastitried.mediagarrdclient.service.DashboardService;
 import wellatleastitried.mediagarrdclient.service.ServerApiService;
 import wellatleastitried.mediagarrdclient.service.ServerDiscoveryService;
+import wellatleastitried.mediagarrdclient.service.ServerSelectionService;
 
 @RestController
 @RequestMapping("/api/client")
@@ -33,19 +33,22 @@ public class ClientController {
     private final ServerApiService serverApiService;
     private final BackupPickupService pickupService;
     private final DashboardService dashboardService;
+    private final ServerSelectionService selectionService;
 
     public ClientController(
         ClientStateService stateService,
         ServerDiscoveryService discoveryService,
         ServerApiService serverApiService,
         BackupPickupService pickupService,
-        DashboardService dashboardService
+        DashboardService dashboardService,
+        ServerSelectionService selectionService
     ) {
         this.stateService = stateService;
         this.discoveryService = discoveryService;
         this.serverApiService = serverApiService;
         this.pickupService = pickupService;
         this.dashboardService = dashboardService;
+        this.selectionService = selectionService;
     }
 
     @GetMapping("/status")
@@ -67,20 +70,7 @@ public class ClientController {
 
     @PutMapping("/server")
     public ClientStatusDto setServer(@RequestBody ServerSelectionRequest request) {
-        if (!isBlank(request.serverUrl())) {
-            stateService.setActiveServer(normalizeServerUrl(request.serverUrl()));
-            return currentStatus();
-        }
-        if (isBlank(request.serverIp())) {
-            throw new IllegalArgumentException("Either serverUrl or serverIp must be provided");
-        }
-        Integer port = request.serverPort();
-        if (port != null && (port < 1 || port > 65535)) {
-            throw new IllegalArgumentException("serverPort must be between 1 and 65535");
-        }
-        String resolved = discoveryService.resolveServerByIp(request.serverIp(), port)
-            .orElseThrow(() -> new IllegalArgumentException("No MediaGarrd server found at " + request.serverIp().trim()));
-        stateService.setActiveServer(resolved);
+        selectionService.select(request);
         return currentStatus();
     }
 
@@ -117,21 +107,5 @@ public class ClientController {
 
     private ClientStatusDto currentStatus() {
         return new ClientStatusDto(stateService.getActiveServer(), stateService.getPickupInterval(), stateService.getKnownServers());
-    }
-
-    static String normalizeServerUrl(String serverUrl) {
-        String trimmed = serverUrl.trim().replaceAll("/+$", "");
-        try {
-            URI uri = URI.create(trimmed);
-            if (("http".equals(uri.getScheme()) || "https".equals(uri.getScheme())) && !isBlank(uri.getHost())) {
-                return trimmed;
-            }
-        } catch (IllegalArgumentException ignored) {
-        }
-        throw new IllegalArgumentException("serverUrl must be an http:// or https:// URL: " + serverUrl);
-    }
-
-    private static boolean isBlank(String value) {
-        return value == null || value.isBlank();
     }
 }

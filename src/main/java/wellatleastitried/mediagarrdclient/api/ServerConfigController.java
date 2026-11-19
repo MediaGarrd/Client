@@ -1,5 +1,6 @@
 package wellatleastitried.mediagarrdclient.api;
 
+import java.time.Duration;
 import java.util.List;
 
 import org.slf4j.Logger;
@@ -19,13 +20,19 @@ import wellatleastitried.mediagarrdclient.dto.ServerConfigDto;
 import wellatleastitried.mediagarrdclient.dto.ServerStatusDto;
 import wellatleastitried.mediagarrdclient.dto.ServiceDto;
 import wellatleastitried.mediagarrdclient.service.ClientStateService;
+import wellatleastitried.mediagarrdclient.service.InvalidRequestException;
 import wellatleastitried.mediagarrdclient.service.ServerApiService;
+import wellatleastitried.mediagarrdclient.service.ServiceNames;
 
 @RestController
 @RequestMapping("/api/client")
 public class ServerConfigController {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ServerConfigController.class);
+
+    private static final Duration MIN_INTERVAL = Duration.ofMinutes(15);
+    private static final Duration MAX_INTERVAL = Duration.ofDays(365);
+    static final String INTERVAL_MESSAGE = "Backup interval must be between 15 minutes and 365 days";
 
     private final ClientStateService stateService;
     private final ServerApiService serverApiService;
@@ -38,13 +45,14 @@ public class ServerConfigController {
     @GetMapping("/server-config")
     public ServerConfigDto serverConfig() {
         String activeServer = stateService.requireActiveServer();
-        LOGGER.info("GET /api/client/server-config, forwarding to {}", activeServer);
+        LOGGER.debug("GET /api/client/server-config, forwarding to {}", activeServer);
         return serverApiService.serverConfig(activeServer);
     }
 
     @PutMapping("/server-config")
     public ServerConfigDto updateServerConfig(@RequestBody ServerConfigDto request) {
         String activeServer = stateService.requireActiveServer();
+        requireValidInterval(request.backupInterval());
         LOGGER.info("PUT /api/client/server-config, request={}, target={}", request, activeServer);
         ServerConfigDto config = serverApiService.updateServerConfig(activeServer, request.backupLocation(), request.retentionCount());
         if (request.backupInterval() == null) {
@@ -54,10 +62,16 @@ public class ServerConfigController {
         return new ServerConfigDto(config.backupLocation(), config.retentionCount(), status.backupInterval());
     }
 
+    private static void requireValidInterval(Duration interval) {
+        if (interval != null && (interval.compareTo(MIN_INTERVAL) < 0 || interval.compareTo(MAX_INTERVAL) > 0)) {
+            throw new InvalidRequestException(INTERVAL_MESSAGE);
+        }
+    }
+
     @GetMapping("/services")
     public List<ServiceDto> services() {
         String activeServer = stateService.requireActiveServer();
-        LOGGER.info("GET /api/client/services, forwarding to {}", activeServer);
+        LOGGER.debug("GET /api/client/services, forwarding to {}", activeServer);
         return serverApiService.listServices(activeServer);
     }
 
@@ -71,6 +85,7 @@ public class ServerConfigController {
 
     @PutMapping("/services/{name}")
     public ServiceDto updateService(@PathVariable String name, @RequestBody ServiceDto service) {
+        ServiceNames.require(name);
         String activeServer = stateService.requireActiveServer();
         LOGGER.info("PUT /api/client/services/{}, name={}, target={}", name, service.name(), activeServer);
         return serverApiService.updateService(activeServer, name, service);
@@ -79,6 +94,7 @@ public class ServerConfigController {
     @DeleteMapping("/services/{name}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void removeService(@PathVariable String name) {
+        ServiceNames.require(name);
         String activeServer = stateService.requireActiveServer();
         LOGGER.info("DELETE /api/client/services/{}, target={}", name, activeServer);
         serverApiService.removeService(activeServer, name);

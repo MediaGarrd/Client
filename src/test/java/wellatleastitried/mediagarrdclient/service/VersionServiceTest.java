@@ -11,11 +11,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.ResourceAccessException;
@@ -32,23 +29,7 @@ class VersionServiceTest {
     private static final VersionStatusDto SERVER = new VersionStatusDto("0.1.0", "0.2.0", "https://github.com/MediaGarrd/Server/releases/tag/v0.2.0", true, CheckState.OK, NOW, null);
     private static final String URL = "http://server:38471";
 
-    private final AtomicReference<Instant> now = new AtomicReference<>(NOW);
-    private final Clock clock = new Clock() {
-        @Override
-        public java.time.ZoneId getZone() {
-            return ZoneId.of("UTC");
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now.get();
-        }
-    };
+    private final MutableClock clock = new MutableClock(NOW);
     private final UpdateCheckService updateCheckService = mock(UpdateCheckService.class);
     private final ServerApiService serverApiService = mock(ServerApiService.class);
     private final VersionService service = new VersionService(updateCheckService, serverApiService, clock);
@@ -96,16 +77,16 @@ class VersionServiceTest {
         service.select(URL);
         service.refresh();
 
-        now.set(NOW.plus(Duration.ofMinutes(59)));
+        clock.set(NOW.plus(Duration.ofMinutes(59)));
         assertFalse(service.needsRefresh());
-        now.set(NOW.plus(Duration.ofHours(1)));
+        clock.set(NOW.plus(Duration.ofHours(1)));
         assertTrue(service.needsRefresh());
 
         service.refresh();
         assertFalse(service.needsRefresh());
         assertFalse(service.invalidate(false));
         assertFalse(service.needsRefresh());
-        now.set(now.get().plus(Duration.ofMinutes(6)));
+        clock.set(clock.instant().plus(Duration.ofMinutes(6)));
         assertTrue(service.invalidate(false));
         assertTrue(service.needsRefresh());
     }
@@ -117,14 +98,14 @@ class VersionServiceTest {
         service.select(URL);
         service.refresh();
 
-        now.set(NOW.plus(Duration.ofSeconds(29)));
+        clock.set(NOW.plus(Duration.ofSeconds(29)));
         assertFalse(service.needsRefresh());
-        now.set(NOW.plus(Duration.ofSeconds(30)));
+        clock.set(NOW.plus(Duration.ofSeconds(30)));
         assertTrue(service.needsRefresh());
         assertTrue(service.refresh());
 
         assertEquals(CheckState.OK, service.versions().server().checkState());
-        now.set(NOW.plus(Duration.ofMinutes(10)));
+        clock.set(NOW.plus(Duration.ofMinutes(10)));
         assertFalse(service.needsRefresh());
     }
 
@@ -135,9 +116,9 @@ class VersionServiceTest {
         service.select(URL);
         service.refresh();
 
-        now.set(NOW.plus(Duration.ofMinutes(4)));
+        clock.set(NOW.plus(Duration.ofMinutes(4)));
         assertFalse(service.needsRefresh());
-        now.set(NOW.plus(Duration.ofMinutes(5)));
+        clock.set(NOW.plus(Duration.ofMinutes(5)));
         assertTrue(service.needsRefresh());
         assertTrue(service.invalidate(false));
     }
@@ -196,9 +177,9 @@ class VersionServiceTest {
         assertEquals(CLIENT, result.client());
         assertEquals(CheckState.UNAVAILABLE, result.server().checkState());
         assertFalse(result.server().updateAvailable());
-        now.set(NOW.plus(Duration.ofMinutes(9)));
+        clock.set(NOW.plus(Duration.ofMinutes(9)));
         assertFalse(service.needsRefresh());
-        now.set(NOW.plus(Duration.ofMinutes(10)));
+        clock.set(NOW.plus(Duration.ofMinutes(10)));
         assertTrue(service.needsRefresh());
     }
 

@@ -1,4 +1,12 @@
 .git
+.jj
+.claude
+.env
+ref
+bin
+.settings
+.classpath
+.project
 .github
 .vscode
 build
@@ -15,4 +23,5 @@ secrets
 LICENSE
 README.md
 CHANGELOG
+docker-compose.yml
 docker-compose.example.yml

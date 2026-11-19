@@ -7,7 +7,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication
 @EnableScheduling
-@EnableConfigurationProperties(Configuration.class)
+@EnableConfigurationProperties(MediaGarrdProperties.class)
 public class MediaGarrd {
 
     public static void main(String[] args) {

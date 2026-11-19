@@ -2,6 +2,9 @@ server:
   port: ${CLIENT_PORT:8081}
 
 spring:
+  jackson:
+    deserialization:
+      fail-on-null-for-primitives: false
   task:
     scheduling:
       pool:
@@ -22,3 +25,6 @@ mediagarrd:
     github-api-base-url: ${MEDIAGARRD_GITHUB_API_URL:https://api.github.com}
     update-check-interval: ${MEDIAGARRD_UPDATE_CHECK_INTERVAL:PT24H}
     backup-run-timeout: ${CLIENT_BACKUP_RUN_TIMEOUT:PT6H}
+    server-ca: ${MEDIAGARRD_SERVER_CA:}
+    password: ${CLIENT_PASSWORD:}
+    reset-password: ${CLIENT_RESET_PASSWORD:false}

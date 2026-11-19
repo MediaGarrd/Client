@@ -2,8 +2,12 @@ function reachableLink(link) {
   return link === 'LIVE' || link === 'DEGRADED';
 }
 
+export function needsPairing(state) {
+  return state.activeServer !== null && (state.pairing === 'REQUIRED' || state.pairing === 'REJECTED');
+}
+
 export function canLoadBackups(state) {
-  return state.loaded && state.clientReachable && state.activeServer !== null && reachableLink(state.link);
+  return state.loaded && state.clientReachable && state.activeServer !== null && reachableLink(state.link) && !needsPairing(state);
 }
 
 export function emptyState() {
@@ -16,6 +20,7 @@ export function emptyState() {
     running: null,
     health: null,
     versions: null,
+    pairing: 'NONE',
   };
 }
 
@@ -29,6 +34,7 @@ function fromSnapshot(payload) {
     running: payload.running ?? null,
     health: payload.health || null,
     versions: payload.versions || null,
+    pairing: payload.pairing || 'PAIRED',
   };
 }
 
@@ -57,6 +63,8 @@ export function reduce(state, name, payload) {
       return { ...base, health: { backupInterval: payload.backupInterval, backupRetentionCount: payload.backupRetentionCount } };
     case 'versions':
       return { ...base, versions: payload };
+    case 'pairing':
+      return { ...base, pairing: payload.state || 'PAIRED' };
     default:
       return base;
   }
@@ -71,6 +79,7 @@ export function changes(prev, next, eventName) {
   const reachedAgain = !first && (
     (!reachableLink(prev.link) && reachableLink(next.link))
     || (!prev.clientReachable && next.clientReachable)
+    || (needsPairing(prev) && !needsPairing(next))
   );
   const finished = prev.running === true && next.running === false;
   const announced = eventName === 'backups-changed' || eventName === 'run-finished';

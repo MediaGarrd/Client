@@ -8,6 +8,7 @@ import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class SemVerTest {
@@ -30,14 +31,10 @@ class SemVerTest {
     }
 
     @ParameterizedTest
+    @NullSource
     @ValueSource(strings = {"", " ", "1", "1.2", "v1.2", "1.2.3.4", "latest", "1.2.x", "1.2.3-", "1.2.3-a..b", "vv1.2.3", "1.2.3 beta", "99999999999999999999.0.0"})
     void rejectsInvalidVersions(String text) {
         assertEquals(Optional.empty(), SemVer.parse(text));
-    }
-
-    @Test
-    void rejectsNull() {
-        assertEquals(Optional.empty(), SemVer.parse(null));
     }
 
     @Test

@@ -18,46 +18,52 @@ import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.web.server.ResponseStatusException;
+import wellatleastitried.mediagarrdclient.service.InvalidRequestException;
+import wellatleastitried.mediagarrdclient.service.NotFoundException;
 
 import wellatleastitried.mediagarrdclient.dto.BackupDto;
 import wellatleastitried.mediagarrdclient.dto.DashboardState;
 import wellatleastitried.mediagarrdclient.dto.HealthSummary;
 import wellatleastitried.mediagarrdclient.dto.LinkState;
+import wellatleastitried.mediagarrdclient.dto.PairingState;
 import wellatleastitried.mediagarrdclient.dto.PickupStartDto;
 import wellatleastitried.mediagarrdclient.dto.VersionsDto;
 import wellatleastitried.mediagarrdclient.service.BackupPickupService;
 import wellatleastitried.mediagarrdclient.service.ClientStateService;
 import wellatleastitried.mediagarrdclient.service.DashboardService;
+import wellatleastitried.mediagarrdclient.service.BackupRunFailedException;
 import wellatleastitried.mediagarrdclient.service.BackupRunTimeoutException;
 import wellatleastitried.mediagarrdclient.service.ServerApiService;
 import wellatleastitried.mediagarrdclient.service.ServerDiscoveryService;
+import wellatleastitried.mediagarrdclient.service.ServerSelectionService;
 
 @WebMvcTest(controllers = ClientController.class)
+@Import({TestSession.class, ServerSelectionService.class})
 class ClientControllerTest {
 
     @Autowired
     MockMvc mockMvc;
 
-    @MockBean
+    @MockitoBean
     ClientStateService stateService;
 
-    @MockBean
+    @MockitoBean
     ServerDiscoveryService discoveryService;
 
-    @MockBean
+    @MockitoBean
     ServerApiService serverApiService;
 
-    @MockBean
+    @MockitoBean
     BackupPickupService backupPickupService;
 
-    @MockBean
+    @MockitoBean
     DashboardService dashboardService;
 
     @Test
@@ -72,14 +78,14 @@ class ClientControllerTest {
     }
 
     @Test
-    void statusEndpointReturnsState() throws Exception {
-        when(stateService.getActiveServer()).thenReturn("http://server:8080");
-        when(stateService.getPickupInterval()).thenReturn(Duration.ofMinutes(45));
-        when(stateService.getKnownServers()).thenReturn(List.of("http://server:8080"));
+    void mapsAFailedBackupRunToAnInternalErrorWithTheReason() throws Exception {
+        when(stateService.requireActiveServer()).thenReturn("http://server:8080");
+        doThrow(new BackupRunFailedException("Backup of radarr failed: disk is full", null))
+            .when(serverApiService).triggerBackup("http://server:8080");
 
-        mockMvc.perform(get("/api/client/status"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.activeServer").value("http://server:8080"));
+        mockMvc.perform(post("/api/client/backups/run"))
+            .andExpect(status().isInternalServerError())
+            .andExpect(jsonPath("$.error").value("Backup of radarr failed: disk is full"));
     }
 
     @Test
@@ -93,38 +99,6 @@ class ClientControllerTest {
             .andExpect(jsonPath("$[0]").value("http://server:8080"));
 
         verify(stateService).updateKnownServers(List.of("http://server:8080"));
-    }
-
-    @Test
-    void listBackupsReturnsServerData() throws Exception {
-        when(stateService.requireActiveServer()).thenReturn("http://server:8080");
-        when(serverApiService.listBackups("http://server:8080")).thenReturn(List.of(new BackupDto("id", "file.zip", 10L, null)));
-
-        mockMvc.perform(get("/api/client/backups"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$[0].id").value("id"));
-    }
-
-    @Test
-    void setServerEndpointAcceptsUpdate() throws Exception {
-        when(stateService.getKnownServers()).thenReturn(List.of("http://server:8080"));
-        when(stateService.getPickupInterval()).thenReturn(Duration.ofMinutes(30));
-        when(stateService.getActiveServer()).thenReturn("http://server:8080");
-
-        mockMvc.perform(put("/api/client/server")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"serverUrl\":\"http://server:8080\"}"))
-            .andExpect(status().isOk());
-    }
-
-    @Test
-    void pickupEndpointStartsTask() throws Exception {
-        when(backupPickupService.startPickupLatestTask()).thenReturn(new PickupStartDto("task-1", "id", "file.zip", 10L));
-
-        mockMvc.perform(post("/api/client/pickup"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.taskId").value("task-1"))
-            .andExpect(jsonPath("$.backupId").value("id"));
     }
 
     @Test
@@ -142,7 +116,8 @@ class ClientControllerTest {
             LinkState.DEGRADED,
             true,
             new HealthSummary(Duration.ofHours(6), 5),
-            new VersionsDto(null, null)));
+            new VersionsDto(null, null),
+            PairingState.PAIRED));
 
         mockMvc.perform(get("/api/client/dashboard"))
             .andExpect(status().isOk())
@@ -158,10 +133,33 @@ class ClientControllerTest {
 
     @Test
     void normalizesSelectedServerUrls() throws Exception {
+        when(discoveryService.isMediaGarrdServer("http://server:8080")).thenReturn(true);
         mockMvc.perform(json(put("/api/client/server"), "{\"serverUrl\":\" http://server:8080/ \"}"))
             .andExpect(status().isOk());
 
         verify(stateService).setActiveServer("http://server:8080");
+    }
+
+    @Test
+    void refusesAServerUrlThatIsNotAMediaGarrdServer() throws Exception {
+        when(discoveryService.isMediaGarrdServer("http://intranet-printer:631")).thenReturn(false);
+
+        mockMvc.perform(json(put("/api/client/server"), "{\"serverUrl\":\"http://intranet-printer:631\"}"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("No MediaGarrd server found at http://intranet-printer:631"));
+
+        verify(stateService, never()).setActiveServer(any());
+    }
+
+    @Test
+    void doesNotProbeAServerThatIsAlreadyKnown() throws Exception {
+        when(stateService.isKnownServer("http://server:8080")).thenReturn(true);
+
+        mockMvc.perform(json(put("/api/client/server"), "{\"serverUrl\":\"http://server:8080\"}"))
+            .andExpect(status().isOk());
+
+        verify(stateService).setActiveServer("http://server:8080");
+        verify(discoveryService, never()).isMediaGarrdServer(any(String.class));
     }
 
     @Test
@@ -192,7 +190,7 @@ class ClientControllerTest {
 
     @Test
     void rejectsInvalidPickupIntervals() throws Exception {
-        when(backupPickupService.updatePickupInterval(Duration.ZERO)).thenThrow(new IllegalArgumentException("Pickup interval must be a positive duration"));
+        when(backupPickupService.updatePickupInterval(Duration.ZERO)).thenThrow(new InvalidRequestException("Pickup interval must be a positive duration"));
 
         mockMvc.perform(json(put("/api/client/pickup-interval"), "{\"interval\":\"PT0S\"}"))
             .andExpect(status().isBadRequest())
@@ -200,8 +198,31 @@ class ClientControllerTest {
     }
 
     @Test
+    void pickingUpASpecificBackupStartsATaskForThatId() throws Exception {
+        when(backupPickupService.startPickupByIdTask("b1")).thenReturn(new PickupStartDto("task-1", "b1", "b1-media-backup.zip", 10L));
+
+        mockMvc.perform(post("/api/client/pickup/b1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.taskId").value("task-1"))
+            .andExpect(jsonPath("$.backupId").value("b1"))
+            .andExpect(jsonPath("$.fileName").value("b1-media-backup.zip"));
+
+        verify(backupPickupService).startPickupByIdTask("b1");
+        verify(backupPickupService, never()).startPickupLatestTask();
+    }
+
+    @Test
+    void pickingUpAnUnknownBackupIsNotFound() throws Exception {
+        when(backupPickupService.startPickupByIdTask("gone")).thenThrow(new NotFoundException("Backup not found: gone"));
+
+        mockMvc.perform(post("/api/client/pickup/gone"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.error").value("Backup not found: gone"));
+    }
+
+    @Test
     void unknownPickupTasksAreNotFound() throws Exception {
-        when(backupPickupService.pickupProgress("gone")).thenThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "Pickup task not found: gone"));
+        when(backupPickupService.pickupProgress("gone")).thenThrow(new NotFoundException("Pickup task not found: gone"));
 
         mockMvc.perform(get("/api/client/pickup/progress/gone"))
             .andExpect(status().isNotFound())

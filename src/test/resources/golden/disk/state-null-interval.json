@@ -1,0 +1,12 @@
+{
+  "pickupIntervalSeconds" : null,
+  "activeServer" : "http://192.168.1.20:38471",
+  "knownServers" : [ "http://192.168.1.20:38471" ],
+  "pairings" : {
+    "http://192.168.1.20:38471" : {
+      "token" : "golden-token-one",
+      "id" : "c0ffee00-0000-4000-8000-000000000001",
+      "name" : "Golden Laptop"
+    }
+  }
+}

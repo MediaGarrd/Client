@@ -46,10 +46,19 @@ export function initServices(root, notify) {
     try {
       await api.removeService(service.name);
       if (editing === service.name) resetForm();
-      notify.ok(`Removed ${service.name}`);
-      await refresh();
     } catch (error) {
       notify.error(error);
+      return;
+    }
+    await refreshThen(`Removed ${service.name}`);
+  }
+
+  async function refreshThen(message) {
+    try {
+      await refresh();
+      notify.ok(message);
+    } catch (error) {
+      notify.warn(`${message}, but the list could not be refreshed: ${error.message}`);
     }
   }
 
@@ -78,14 +87,15 @@ export function initServices(root, notify) {
       name: form.elements.name.value,
       paths: [...paths.querySelectorAll('input')].map((input) => input.value),
     };
+    let saved;
     try {
-      const saved = editing ? await api.updateService(editing, service) : await api.addService(service);
-      notify.ok(`Saved ${saved.name}`);
+      saved = editing ? await api.updateService(editing, service) : await api.addService(service);
       resetForm();
-      await refresh();
     } catch (error) {
       notify.error(error);
+      return;
     }
+    await refreshThen(`Saved ${saved.name}`);
   });
 
   root.querySelector('[data-add-path]').addEventListener('click', () => addPathInput());
