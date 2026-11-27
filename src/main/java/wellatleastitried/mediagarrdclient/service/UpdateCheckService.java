@@ -1,6 +1,7 @@
 package wellatleastitried.mediagarrdclient.service;
 
 import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
@@ -24,11 +25,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
+import org.springframework.web.util.UriUtils;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
-import wellatleastitried.mediagarrdclient.Configuration;
+import wellatleastitried.mediagarrdclient.MediaGarrdProperties;
 import wellatleastitried.mediagarrdclient.dto.CheckState;
 import wellatleastitried.mediagarrdclient.dto.VersionStatusDto;
 
@@ -43,6 +45,7 @@ public class UpdateCheckService {
     private static final Logger LOGGER = LoggerFactory.getLogger(UpdateCheckService.class);
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(3);
     private static final Duration READ_TIMEOUT = Duration.ofSeconds(5);
+    private static final String GITHUB_PAGES = "https://github.com/";
     static final Duration MIN_INTERVAL = Duration.ofHours(1);
 
     private final String currentVersion;
@@ -54,11 +57,11 @@ public class UpdateCheckService {
     private final List<Consumer<VersionStatusDto>> listeners = new CopyOnWriteArrayList<>();
 
     @Autowired
-    public UpdateCheckService(Configuration properties, ObjectProvider<BuildProperties> buildProperties) {
+    public UpdateCheckService(MediaGarrdProperties properties, ObjectProvider<BuildProperties> buildProperties) {
         this(properties, versionOf(buildProperties), Clock.systemUTC());
     }
 
-    UpdateCheckService(Configuration properties, String currentVersion, Clock clock) {
+    UpdateCheckService(MediaGarrdProperties properties, String currentVersion, Clock clock) {
         Duration interval = properties.getUpdateCheckInterval();
         if (interval == null || interval.compareTo(MIN_INTERVAL) < 0) {
             throw new IllegalStateException("mediagarrd.client.update-check-interval must be at least " + MIN_INTERVAL + ", was " + interval);
@@ -133,9 +136,9 @@ public class UpdateCheckService {
         if (latest.isEmpty()) {
             return result(CheckState.ERROR, null, null, "Latest release has an unrecognized version tag");
         }
-        String url = release.htmlUrl() == null || release.htmlUrl().isBlank()
-            ? "https://github.com/" + repository + "/releases/tag/" + release.tagName().strip()
-            : release.htmlUrl();
+        String url = release.htmlUrl() != null && release.htmlUrl().startsWith(GITHUB_PAGES)
+            ? release.htmlUrl()
+            : GITHUB_PAGES + repository + "/releases/tag/" + UriUtils.encodePathSegment(release.tagName().strip(), StandardCharsets.UTF_8);
         return result(CheckState.OK, latest.get(), url, null);
     }
 

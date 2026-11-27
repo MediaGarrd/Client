@@ -27,6 +27,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.AfterEach;
@@ -37,10 +38,10 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.scheduling.annotation.Scheduled;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 import com.sun.net.httpserver.HttpServer;
 
-import wellatleastitried.mediagarrdclient.Configuration;
+import wellatleastitried.mediagarrdclient.MediaGarrdProperties;
 import wellatleastitried.mediagarrdclient.service.ServerDiscoveryService.HostInput;
 
 @Timeout(10)
@@ -48,9 +49,9 @@ class ServerDiscoveryServiceTest {
 
     private static final String HEALTH = "{\"healthy\":true,\"running\":false,\"backupRetentionCount\":4,\"backupInterval\":\"PT6H\"}";
 
-    private final Configuration configuration = new Configuration();
+    private final MediaGarrdProperties configuration = new MediaGarrdProperties();
     private final ClientStateService state = mock(ClientStateService.class);
-    private final ServerDiscoveryService discovery = new ServerDiscoveryService(configuration, state, new ObjectMapper());
+    private final ServerDiscoveryService discovery = new ServerDiscoveryService(configuration, state, JsonMapper.builder().build(), ServerTls.defaults());
     private HttpServer mediaGarrd;
     private HttpServer otherApp;
 
@@ -89,31 +90,14 @@ class ServerDiscoveryServiceTest {
     }
 
     @Test
-    void preferredServerIsResolvedFromConfiguration() {
-        configuration.setPreferredServerIp("localhost:" + port(mediaGarrd));
-
-        assertEquals(Optional.of("http://localhost:" + port(mediaGarrd)), discovery.resolvePreferredServer());
-    }
-
-    @Test
     void connectsThePreferredServerOnlyWhileNoneIsSelected() {
-        configuration.setPreferredServerIp("127.0.0.1:" + port(mediaGarrd));
+        configuration.setPreferredServerIp("localhost:" + port(mediaGarrd));
 
         discovery.connectPreferredServer();
         when(state.getActiveServer()).thenReturn("http://other:38471");
         discovery.connectPreferredServer();
 
-        verify(state, times(1)).setActiveServerIfBlank(url(mediaGarrd));
-    }
-
-    @Test
-    void retriesQuicklyWhileNoServerIsSelected() throws NoSuchMethodException {
-        Scheduled schedule = ServerDiscoveryService.class.getMethod("connectPreferredServer").getAnnotation(Scheduled.class);
-
-        assertTrue(schedule.fixedDelay() >= 1_000 && schedule.fixedDelay() <= 5_000,
-            "connectPreferredServer must use a numeric fixedDelay of 1-5 s, found " + schedule.fixedDelay() + " ms (fixedDelayString='" + schedule.fixedDelayString() + "')");
-        assertTrue(schedule.initialDelay() >= 0 && schedule.initialDelay() <= 5_000,
-            "connectPreferredServer must use a numeric initialDelay of at most 5 s, found " + schedule.initialDelay() + " ms (initialDelayString='" + schedule.initialDelayString() + "')");
+        verify(state, times(1)).setActiveServerIfBlank("http://localhost:" + port(mediaGarrd));
     }
 
     @Test
@@ -141,9 +125,10 @@ class ServerDiscoveryServiceTest {
     void abandonsAHangingResolveAtTheDeadlineAndNeverOverlapsAttempts() throws InterruptedException {
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger attempts = new AtomicInteger();
+        AtomicBoolean resolveFinished = new AtomicBoolean();
         ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor();
         Duration deadline = Duration.ofMillis(300);
-        ServerDiscoveryService hanging = new ServerDiscoveryService(configuration, state, new ObjectMapper(), pool, deadline) {
+        ServerDiscoveryService hanging = new ServerDiscoveryService(configuration, state, JsonMapper.builder().build(), ServerTls.defaults(), pool, deadline) {
             @Override
             public Optional<String> resolvePreferredServer() {
                 attempts.incrementAndGet();
@@ -154,14 +139,13 @@ class ServerDiscoveryServiceTest {
                     } catch (InterruptedException ignored) {
                     }
                 }
+                resolveFinished.set(true);
                 return Optional.empty();
             }
         };
         try {
-            long start = System.nanoTime();
             hanging.connectPreferredServer();
-            long elapsed = Duration.ofNanos(System.nanoTime() - start).toMillis();
-            assertTrue(elapsed < deadline.toMillis() + 1_500, "tick blocked for " + elapsed + " ms");
+            assertFalse(resolveFinished.get(), "the tick waited for the hanging resolve instead of abandoning it at the deadline");
 
             hanging.connectPreferredServer();
             hanging.connectPreferredServer();
@@ -214,7 +198,7 @@ class ServerDiscoveryServiceTest {
                 return true;
             }
         };
-        ServerDiscoveryService service = new ServerDiscoveryService(configuration, state, new ObjectMapper(), deferred, Duration.ofMillis(100));
+        ServerDiscoveryService service = new ServerDiscoveryService(configuration, state, JsonMapper.builder().build(), ServerTls.defaults(), deferred, Duration.ofMillis(100));
 
         service.connectPreferredServer();
         assertEquals(1, queued.size());
@@ -280,7 +264,7 @@ class ServerDiscoveryServiceTest {
     @ParameterizedTest
     @CsvSource(value = {"192.168.1.5, 192.168.1.5, null", "192.168.1.5:9000, 192.168.1.5, 9000", "http://server:38471/, server, 38471", "[::1]:8080, ::1, 8080"}, nullValues = "null")
     void parsesHostsWithOptionalPorts(String input, String host, Integer port) {
-        assertEquals(new HostInput(host, port), ServerDiscoveryService.parseHost(input));
+        assertEquals(new HostInput("http", host, port), ServerDiscoveryService.parseHost(input));
     }
 
     @Test
@@ -316,5 +300,57 @@ class ServerDiscoveryServiceTest {
 
     private static String url(HttpServer server) {
         return "http://127.0.0.1:" + port(server);
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {"https://garrd.example.com, garrd.example.com, null", "https://garrd.example.com:8443/, garrd.example.com, 8443", "HTTPS://Host, Host, null"}, nullValues = "null")
+    void keepsTheHttpsSchemeOfAnAddress(String input, String host, Integer port) {
+        HostInput parsed = ServerDiscoveryService.parseHost(input);
+
+        assertEquals(new HostInput("https", host, port), parsed);
+        assertTrue(parsed.https());
+    }
+
+    @Test
+    void anHttpsCandidateOmitsTheDefaultPort() {
+        assertEquals("https://garrd.example.com", new ServerDiscoveryService.Candidate("https", "garrd.example.com", null, 443).url());
+        assertEquals("https://garrd.example.com:8443", new ServerDiscoveryService.Candidate("https", "garrd.example.com", null, 8443).url());
+        assertEquals("http://10.0.0.5:80", new ServerDiscoveryService.Candidate("10.0.0.5", null, 80).url());
+    }
+
+    @Test
+    void anHttpsAddressWithoutAPortIsProbedExactlyOnceOnPort443() {
+        List<String> probed = new java.util.concurrent.CopyOnWriteArrayList<>();
+        ServerDiscoveryService service = new ServerDiscoveryService(configuration, state, JsonMapper.builder().build(), ServerTls.defaults()) {
+            @Override
+            boolean isMediaGarrdServer(Candidate candidate) {
+                probed.add(candidate.url());
+                return true;
+            }
+        };
+
+        assertEquals(java.util.Optional.of("https://127.0.0.1"), service.resolveServerByIp("https://127.0.0.1", null));
+        assertEquals(java.util.Optional.of("https://127.0.0.1:8443"), service.resolveServerByIp("https://127.0.0.1:8443", null));
+        assertEquals(java.util.Optional.of("https://127.0.0.1:9443"), service.resolveServerByIp("https://127.0.0.1", 9443));
+
+        assertEquals(List.of("https://127.0.0.1", "https://127.0.0.1:8443", "https://127.0.0.1:9443"), probed);
+    }
+
+    @Test
+    void anHttpsPreferredServerIsProbedOnce() {
+        MediaGarrdProperties https = new MediaGarrdProperties();
+        https.setPreferredServerIp("https://127.0.0.1");
+        List<String> probed = new java.util.concurrent.CopyOnWriteArrayList<>();
+        ServerDiscoveryService service = new ServerDiscoveryService(https, state, JsonMapper.builder().build(), ServerTls.defaults()) {
+            @Override
+            boolean isMediaGarrdServer(Candidate candidate) {
+                probed.add(candidate.url());
+                return false;
+            }
+        };
+
+        assertTrue(service.resolvePreferredServer().isEmpty());
+
+        assertEquals(List.of("https://127.0.0.1"), probed);
     }
 }

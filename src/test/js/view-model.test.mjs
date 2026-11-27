@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { emptyState, reduce } from '../../main/resources/static/js/dashboard-model.js';
-import { classifyVersion, linkView, planKnown, versionsView } from '../../main/resources/static/js/view-model.js';
+import { classifyVersion, configUnavailableMessage, linkView, listingError, planKnown, versionsView } from '../../main/resources/static/js/view-model.js';
 
 const loaded = (overrides = {}) => reduce(emptyState(), 'snapshot', {
   activeServer: 'http://a:38471',
@@ -32,7 +32,7 @@ test('a live server shows its details and the host in the badge', () => {
 
 test('a degraded server looks connected but says live updates are unavailable', () => {
   const view = linkView(loaded({ link: 'DEGRADED' }));
-  assert.equal(view.badge.kind, 'ok');
+  assert.equal(view.badge.kind, 'degraded');
   assert.equal(view.showDetails, true);
   assert.equal(view.degraded, true);
 });
@@ -139,4 +139,40 @@ test('a server that has not answered yet is connecting, not unreachable', () => 
   assert.deepEqual(view.badge, { kind: 'checking', label: 'Connecting…' });
   assert.equal(view.showDetails, false);
   assert.equal(view.message, 'Connecting to http://a:38471…');
+});
+
+test('a reachable server that is not paired says pairing is required', () => {
+  const view = linkView(loaded({ pairing: 'REQUIRED', link: 'DEGRADED' }));
+  assert.deepEqual(view.badge, { kind: 'down', label: 'Pairing required' });
+  assert.equal(view.showDetails, false);
+  assert.match(view.message, /not paired with http:\/\/a:38471/);
+});
+
+test('a rejected token is reported as such', () => {
+  const view = linkView(loaded({ pairing: 'REJECTED', link: 'DEGRADED' }));
+  assert.match(view.message, /rejected this client's token/);
+});
+
+test('an unreachable server is reported as unreachable before pairing is mentioned', () => {
+  const view = linkView(loaded({ pairing: 'REQUIRED', link: 'DOWN' }));
+  assert.equal(view.badge.label, 'Unreachable');
+});
+
+test('a listing error only suggests connecting when no server is connected', () => {
+  const error = new Error('The server rejected this client\'s token, pair it again');
+  assert.equal(listingError(error, true), 'The server rejected this client\'s token, pair it again.');
+  assert.equal(listingError(error, false), 'The server rejected this client\'s token, pair it again. Connect to a server to view archives.');
+});
+
+test('a message that already ends in punctuation gets no second full stop', () => {
+  const error = new Error('The client or a proxy in front of it did not respond in time.');
+  assert.equal(listingError(error, true), 'The client or a proxy in front of it did not respond in time.');
+  assert.equal(listingError(error, false), 'The client or a proxy in front of it did not respond in time. Connect to a server to view archives.');
+  assert.match(configUnavailableMessage(error), /in time\. Connect to a MediaGarrd server/);
+});
+
+test('the server configuration message tells an unpaired client to pair and otherwise keeps the reason', () => {
+  const unpaired = Object.assign(new Error('This client is not paired with the server, pair it first'), { pairing: 'required' });
+  assert.equal(configUnavailableMessage(unpaired), 'Pair this client with the server on the Dashboard to manage its configuration.');
+  assert.match(configUnavailableMessage(new Error('No active MediaGarrd server selected')), /^No active MediaGarrd server selected\. Connect to a MediaGarrd server/);
 });

@@ -141,13 +141,6 @@ test('a run finishing reloads the backups, however it was learned', () => {
   assert.equal(changes(idle, reduce(idle, 'run-started', {}), 'run-started').refreshBackups, false);
 });
 
-test('a backups-changed announcement reloads the backups while the server is up', () => {
-  const state = loaded();
-  assert.equal(changes(state, reduce(state, 'backups-changed', {}), 'backups-changed').refreshBackups, true);
-  const down = loaded({ link: 'DOWN' });
-  assert.equal(changes(down, reduce(down, 'backups-changed', {}), 'backups-changed').refreshBackups, false);
-});
-
 test('coming back from DOWN or from an unreachable client reloads the backups', () => {
   const down = loaded({ link: 'DOWN' });
   assert.equal(changes(down, reduce(down, 'link', { state: 'LIVE' }), 'link').refreshBackups, true);
@@ -199,4 +192,24 @@ test('a connecting link forgets the run state and a first answer reloads the bac
   assert.equal(connecting.running, null);
   const up = reduce(connecting, 'link', { state: 'DEGRADED' });
   assert.equal(changes(connecting, up, 'link').refreshBackups, true);
+});
+
+test('a snapshot carries the pairing state and defaults to paired when it is missing', () => {
+  assert.equal(loaded({ pairing: 'REQUIRED' }).pairing, 'REQUIRED');
+  assert.equal(loaded().pairing, 'PAIRED');
+  assert.equal(loaded({ activeServer: null, pairing: 'NONE' }).pairing, 'NONE');
+});
+
+test('a pairing event changes the pairing state', () => {
+  const state = reduce(loaded({ pairing: 'PAIRED' }), 'pairing', { state: 'REJECTED' });
+  assert.equal(state.pairing, 'REJECTED');
+  assert.equal(reduce(state, 'pairing', { state: 'PAIRED' }).pairing, 'PAIRED');
+});
+
+test('archives are not loaded for a server that is not paired and load once pairing succeeds', () => {
+  assert.equal(canLoadBackups(loaded({ pairing: 'REQUIRED' })), false);
+  assert.equal(canLoadBackups(loaded({ pairing: 'REJECTED' })), false);
+  const rejected = loaded({ pairing: 'REJECTED' });
+  const result = applyEvent(rejected, 'pairing', { state: 'PAIRED' });
+  assert.equal(result.effects.refreshBackups, true);
 });

@@ -19,11 +19,14 @@ import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
-import wellatleastitried.mediagarrdclient.Configuration;
+import wellatleastitried.mediagarrdclient.MediaGarrdProperties;
 import wellatleastitried.mediagarrdclient.dto.CheckState;
 import wellatleastitried.mediagarrdclient.dto.VersionStatusDto;
 
@@ -33,7 +36,7 @@ class UpdateCheckServiceTest {
 
     private final List<String> requests = new ArrayList<>();
     private final List<String> userAgents = new ArrayList<>();
-    private final Configuration properties = new Configuration();
+    private final MediaGarrdProperties properties = new MediaGarrdProperties();
     private HttpServer server;
     private int status = 200;
     private String rateLimitRemaining;
@@ -119,36 +122,16 @@ class UpdateCheckServiceTest {
         assertEquals(List.of("MediaGarrd-Client/0.1.0"), userAgents);
     }
 
-    @Test
-    void reportsUpToDateWhenTheLatestReleaseIsTheSameVersion() {
-        response = release("v0.1.0");
-        UpdateCheckService service = service("0.1.0");
+    @ParameterizedTest
+    @CsvSource({"0.1.0,v0.1.0,0.1.0", "0.2.0,v0.1.0,0.1.0", "0.2.0,v0.2.0-rc.1,0.2.0-rc.1"})
+    void reportsUpToDateWhenTheLatestReleaseIsTheSameOrOlder(String current, String tag, String latest) {
+        response = release(tag);
+        UpdateCheckService service = service(current);
 
         service.check();
 
         assertEquals(CheckState.OK, service.status().checkState());
-        assertEquals("0.1.0", service.status().latestVersion());
-        assertFalse(service.status().updateAvailable());
-    }
-
-    @Test
-    void neverReportsAnOlderReleaseAsAnUpdate() {
-        response = release("v0.1.0");
-        UpdateCheckService service = service("0.2.0");
-
-        service.check();
-
-        assertEquals(CheckState.OK, service.status().checkState());
-        assertFalse(service.status().updateAvailable());
-    }
-
-    @Test
-    void treatsAPrereleaseOfTheRunningVersionAsOlder() {
-        response = release("v0.2.0-rc.1");
-        UpdateCheckService service = service("0.2.0");
-
-        service.check();
-
+        assertEquals(latest, service.status().latestVersion());
         assertFalse(service.status().updateAvailable());
     }
 
@@ -268,9 +251,10 @@ class UpdateCheckServiceTest {
         assertTrue(requests.isEmpty());
     }
 
-    @Test
-    void buildsTheReleaseUrlWhenGithubOmitsIt() {
-        response = "{\"tag_name\": \"v0.3.0\"}";
+    @ParameterizedTest
+    @ValueSource(strings = {", \"html_url\": \"javascript:alert(1)\"", ", \"html_url\": \"https://github.com.evil.example/x\"", ""})
+    void replacesAReleaseUrlThatIsNotOnGithub(String htmlUrl) {
+        response = "{\"tag_name\": \"v0.3.0\"" + htmlUrl + "}";
         UpdateCheckService service = service("0.1.0");
 
         service.check();

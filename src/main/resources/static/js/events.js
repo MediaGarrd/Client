@@ -1,18 +1,19 @@
 import { createReachability } from './reachability.js';
 
 const EVENTS_URL = '/api/client/events';
-const EVENT_NAMES = ['snapshot', 'link', 'state', 'run-started', 'run-finished', 'servers', 'config', 'backups-changed', 'versions', 'ping'];
+export const EVENT_NAMES = ['snapshot', 'link', 'state', 'run-started', 'run-finished', 'servers', 'config', 'backups-changed', 'versions', 'pairing', 'ping'];
 const RETRY_MIN_MS = 2000;
 const RETRY_MAX_MS = 30000;
 const SILENCE_LIMIT_MS = 60000;
 const SILENCE_CHECK_MS = 15000;
 const RECONNECT_GRACE_MS = 8000;
 
-export function initEvents({ onEvent, onConnection }) {
+export function initEvents({ onEvent, onConnection, checkSession = async () => {} }) {
   let source = null;
   let retryTimer = null;
   let retryDelay = RETRY_MIN_MS;
   let lastMessageAt = 0;
+  let opened = false;
   const reachability = createReachability({ graceMs: RECONNECT_GRACE_MS, onChange: onConnection });
 
   function parse(event) {
@@ -45,7 +46,9 @@ export function initEvents({ onEvent, onConnection }) {
     const created = new EventSource(EVENTS_URL);
     source = created;
     lastMessageAt = Date.now();
+    opened = false;
     created.addEventListener('open', () => {
+      opened = true;
       lastMessageAt = Date.now();
       retryDelay = RETRY_MIN_MS;
       reachability.alive();
@@ -54,8 +57,13 @@ export function initEvents({ onEvent, onConnection }) {
       if (source !== created) return;
       const closed = created.readyState === EventSource.CLOSED;
       reachability.failed(closed);
-      if (!closed) return;
+      if (!closed) {
+        opened = false;
+        return;
+      }
+      const neverOpened = !opened;
       close();
+      if (neverOpened) checkSession().catch(() => {});
       scheduleReopen();
     });
     EVENT_NAMES.forEach((name) => created.addEventListener(name, (event) => {
@@ -81,11 +89,10 @@ export function initEvents({ onEvent, onConnection }) {
   setInterval(() => {
     if (source && Date.now() - lastMessageAt > SILENCE_LIMIT_MS) {
       close();
+      reachability.failed(true);
       open();
     }
   }, SILENCE_CHECK_MS);
 
   open();
-
-  return { open, close };
 }

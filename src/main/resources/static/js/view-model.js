@@ -1,6 +1,20 @@
+import { needsPairing } from './dashboard-model.js';
 import { formatInterval } from './format.js';
 
 const RELEASE_URL = /^https?:\/\//;
+
+export function listingError(error, connected) {
+  const message = /[.!?]$/.test(error.message) ? error.message : `${error.message}.`;
+  return connected ? message : `${message} Connect to a server to view archives.`;
+}
+
+export function configUnavailableMessage(error) {
+  if (error?.pairing === 'required') {
+    return 'Pair this client with the server on the Dashboard to manage its configuration.';
+  }
+  const message = /[.!?]$/.test(error.message) ? error.message : `${error.message}.`;
+  return `${message} Connect to a MediaGarrd server that has finished setup on the Dashboard to manage its configuration.`;
+}
 
 export function linkView(state) {
   const none = { showDetails: false, url: '', interval: '—', retention: '—', running: false, degraded: false };
@@ -19,8 +33,14 @@ export function linkView(state) {
   if (state.link === 'DOWN') {
     return { ...none, badge: { kind: 'down', label: 'Unreachable' }, message: `${state.activeServer} is not responding.` };
   }
+  if (needsPairing(state)) {
+    const message = state.pairing === 'REJECTED'
+      ? `${state.activeServer} rejected this client's token. Pair again to continue.`
+      : `This client is not paired with ${state.activeServer}.`;
+    return { ...none, badge: { kind: 'down', label: 'Pairing required' }, message };
+  }
   return {
-    badge: { kind: 'ok', label: state.activeServer.replace(/^https?:\/\//, '') },
+    badge: { kind: state.link === 'DEGRADED' ? 'degraded' : 'ok', label: state.activeServer.replace(/^https?:\/\//, '') },
     message: '',
     showDetails: true,
     url: state.activeServer,

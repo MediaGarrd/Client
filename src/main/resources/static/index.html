@@ -17,14 +17,43 @@
       <button type="button" data-view-link="dashboard" aria-pressed="true">Dashboard</button>
       <button type="button" data-view-link="config" aria-pressed="false">Server Config</button>
     </nav>
-    <div class="conn-badge" id="connBadge">
-      <span class="dot"></span>
-      <span data-label>Connecting…</span>
+    <div class="topbar-end">
+      <div class="conn-badge" id="connBadge" aria-live="polite">
+        <span class="dot"></span>
+        <span data-label>Connecting…</span>
+      </div>
+      <button type="button" class="ghost small" data-logout hidden>Log out</button>
     </div>
   </header>
 
+  <div class="auth" id="auth" hidden>
+    <section class="panel auth-card" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+      <div class="panel-header"><span class="panel-title" id="authTitle" data-auth-title>Sign in</span></div>
+      <form class="panel-body" data-login-form hidden>
+        <div class="field-group">
+          <label class="field-label" for="loginPassword">Password</label>
+          <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="full">Sign in</button>
+      </form>
+      <form class="panel-body" data-set-form hidden>
+        <p class="note">No password is set yet. Choose one now: whoever opens this page first sets it. You can also set <code>CLIENT_PASSWORD</code> in the client's environment.</p>
+        <div class="field-group">
+          <label class="field-label" for="newPassword">New password (at least 8 characters)</label>
+          <input id="newPassword" name="password" type="password" autocomplete="new-password" minlength="8" required>
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="confirmPassword">Repeat the password</label>
+          <input id="confirmPassword" name="confirm" type="password" autocomplete="new-password" required>
+        </div>
+        <button type="submit" class="full">Set password</button>
+      </form>
+      <p class="auth-error" data-auth-error role="alert"></p>
+    </section>
+  </div>
+
   <div class="page">
-    <div class="banner" id="banner" role="status"></div>
+    <div class="banner" id="banner" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <main class="workspace" data-view="dashboard">
       <section class="panel" id="connection">
@@ -34,7 +63,7 @@
           <div class="section-label">Connect by IP</div>
           <div class="field-group">
             <div class="input-row-2">
-              <input name="ip" type="text" placeholder="192.168.1.x" aria-label="Server IP" required>
+              <input name="ip" type="text" placeholder="192.168.1.x or https://host" aria-label="Server address" required>
               <input name="port" type="number" min="1" max="65535" placeholder="Port" aria-label="Server port">
             </div>
           </div>
@@ -80,6 +109,29 @@
           <p class="note" data-degraded hidden>Live updates are unavailable from this server. Its status is checked every few seconds instead.</p>
         </div>
 
+        <div class="panel-body" id="pairing" hidden>
+          <form data-pair-form hidden>
+            <div class="section-label">Pair with this server</div>
+            <div class="field-group">
+              <input name="pin" type="text" autocomplete="off" spellcheck="false" placeholder="PIN or pairing code" aria-label="PIN or pairing code" required>
+              <p class="note" data-pair-note></p>
+            </div>
+            <button type="submit" class="full">Pair</button>
+          </form>
+          <div data-manage hidden>
+            <div class="section-label">Pairing</div>
+            <div class="button-row">
+              <button type="button" class="ghost" data-create-code>Create Pairing Code</button>
+              <button type="button" class="danger" data-unpair>Unpair</button>
+            </div>
+            <div class="code-box" data-code-box hidden>
+              <span class="code" data-code></span>
+              <span class="note" data-code-expiry></span>
+            </div>
+            <p class="note">A pairing code lets one more client pair with this server. It works once and expires after 10 minutes.</p>
+          </div>
+        </div>
+
         <div class="panel-body" id="actions">
           <div class="section-label">Actions</div>
           <div class="button-row">
@@ -98,7 +150,7 @@
           <div class="section-label">Client Pickup Interval</div>
           <div class="field-group">
             <label class="field-label" for="pickupMinutes">Minutes between automatic downloads of the latest backup</label>
-            <input id="pickupMinutes" name="minutes" type="number" min="1" step="1" required>
+            <input id="pickupMinutes" name="minutes" type="number" min="1" max="525600" step="1" required>
           </div>
           <button type="submit" class="full ghost">Save Pickup Interval</button>
         </form>
@@ -109,18 +161,20 @@
           <span class="panel-title">Backup Archives</span>
           <button type="button" class="ghost small" data-refresh>Refresh</button>
         </div>
+        <div class="table-scroll">
         <table>
           <thead>
             <tr>
-              <th class="sortable" data-sort-key="fileName">File <span class="sort-indicator"></span></th>
-              <th class="sortable" data-sort-key="sizeBytes">Size <span class="sort-indicator"></span></th>
-              <th class="sortable" data-sort-key="createdAt">Created <span class="sort-indicator"></span></th>
-              <th class="sortable" data-sort-key="id">ID <span class="sort-indicator"></span></th>
-              <th class="actions-cell">Get</th>
+              <th class="sortable" scope="col" data-sort-key="fileName" aria-sort="none"><button type="button" class="sort-btn">File <span class="sort-indicator" aria-hidden="true"></span></button></th>
+              <th class="sortable" scope="col" data-sort-key="sizeBytes" aria-sort="none"><button type="button" class="sort-btn">Size <span class="sort-indicator" aria-hidden="true"></span></button></th>
+              <th class="sortable" scope="col" data-sort-key="createdAt" aria-sort="none"><button type="button" class="sort-btn">Created <span class="sort-indicator" aria-hidden="true"></span></button></th>
+              <th class="sortable" scope="col" data-sort-key="id" aria-sort="none"><button type="button" class="sort-btn">ID <span class="sort-indicator" aria-hidden="true"></span></button></th>
+              <th class="actions-cell" scope="col">Get</th>
             </tr>
           </thead>
           <tbody></tbody>
         </table>
+        </div>
         <p class="empty-state" data-empty>No backups loaded. Connect to a server to view archives.</p>
 
         <template id="backupTemplate">
@@ -129,7 +183,7 @@
             <td data-size></td>
             <td class="td-muted" data-created></td>
             <td class="td-mono td-muted td-id" data-id></td>
-            <td class="actions-cell"><button type="button" class="ghost icon-btn" title="Download this backup">↓</button></td>
+            <td class="actions-cell"><button type="button" class="ghost icon-btn" title="Download this backup" aria-label="Download this backup">↓</button></td>
           </tr>
         </template>
       </section>
@@ -153,7 +207,7 @@
       </section>
     </main>
 
-    <main data-view="config" hidden>
+    <div data-view="config" role="region" aria-label="Server configuration" hidden>
       <section class="panel" data-unavailable hidden>
         <p class="empty-state" data-reason></p>
       </section>
@@ -169,61 +223,82 @@
             </div>
             <div class="field-group">
               <label class="field-label" for="intervalHours">Hours between backups</label>
-              <input id="intervalHours" name="intervalHours" type="number" min="0.25" step="0.25" required>
+              <input id="intervalHours" name="intervalHours" type="number" min="0.25" max="8760" step="any" required>
             </div>
             <div class="field-group">
               <label class="field-label" for="retentionCount">Backups to keep</label>
-              <input id="retentionCount" name="retentionCount" type="number" min="1" step="1" required>
+              <input id="retentionCount" name="retentionCount" type="number" min="1" max="525600" step="1" required>
             </div>
             <div class="button-row"><button type="submit">Save Settings</button></div>
           </form>
         </section>
 
-        <section class="panel" id="services">
-          <div class="panel-header"><span class="panel-title" data-form-title>Add Service</span></div>
-          <form class="panel-body">
-            <div class="field-group">
-              <label class="field-label" for="serviceName">Name</label>
-              <input id="serviceName" name="name" placeholder="radarr" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}" title="Up to 64 letters, digits, '.', '_' or '-', starting with a letter or digit" required>
-            </div>
-            <div class="field-group">
-              <span class="field-label">Host paths to back up</span>
-              <div class="field-group" data-paths></div>
-              <button type="button" class="ghost" data-add-path>+ Add Path</button>
-            </div>
-            <div class="button-row">
-              <button type="submit">Save Service</button>
-              <button type="button" class="ghost" data-cancel hidden>Cancel</button>
-            </div>
-          </form>
+        <div class="stack">
+          <section class="panel" id="services">
+            <div class="panel-header"><span class="panel-title" data-form-title>Add Service</span></div>
+            <form class="panel-body">
+              <div class="field-group">
+                <label class="field-label" for="serviceName">Name</label>
+                <input id="serviceName" name="name" placeholder="radarr" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}" title="Up to 64 letters, digits, '.', '_' or '-', starting with a letter or digit" required>
+              </div>
+              <div class="field-group">
+                <span class="field-label" id="pathsLabel">Host paths to back up</span>
+                <div class="field-group" data-paths role="group" aria-labelledby="pathsLabel"></div>
+                <button type="button" class="ghost" data-add-path>+ Add Path</button>
+              </div>
+              <div class="button-row">
+                <button type="submit">Save Service</button>
+                <button type="button" class="ghost" data-cancel hidden>Cancel</button>
+              </div>
+            </form>
 
-          <template id="pathTemplate">
-            <div class="input-row">
-              <input name="path" placeholder="/srv/appdata/radarr/config" pattern="/.+" title="An absolute host path starting with /" required>
-              <button type="button" class="ghost" title="Remove path">&times;</button>
+            <template id="pathTemplate">
+              <div class="input-row">
+                <input name="path" aria-label="Host path" placeholder="/srv/appdata/radarr/config" pattern="/.+" title="An absolute host path starting with /" required>
+                <button type="button" class="ghost" title="Remove path" aria-label="Remove path">&times;</button>
+              </div>
+            </template>
+
+            <template id="serviceTemplate">
+              <tr>
+                <td data-name></td>
+                <td class="td-mono" data-paths></td>
+                <td class="actions-cell">
+                  <button type="button" class="ghost" data-edit>Edit</button>
+                  <button type="button" class="danger" data-remove>Remove</button>
+                </td>
+              </tr>
+            </template>
+
+            <div class="panel-header"><span class="panel-title">Configured Services</span></div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th scope="col">Name</th><th scope="col">Paths</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+                <tbody></tbody>
+              </table>
             </div>
-          </template>
+            <p class="empty-state" data-empty>No services configured yet.</p>
+          </section>
 
-          <template id="serviceTemplate">
-            <tr>
-              <td data-name></td>
-              <td class="td-mono" data-paths></td>
-              <td class="actions-cell">
-                <button type="button" class="ghost" data-edit>Edit</button>
-                <button type="button" class="danger" data-remove>Remove</button>
-              </td>
-            </tr>
-          </template>
-
-          <div class="panel-header"><span class="panel-title">Configured Services</span></div>
-          <table>
-            <thead><tr><th>Name</th><th>Paths</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
-          <p class="empty-state" data-empty>No services configured yet.</p>
-        </section>
+          <section class="panel" id="webhook">
+            <div class="panel-header"><span class="panel-title">Failure Notifications</span></div>
+            <form class="panel-body" id="webhookForm">
+              <div class="field-group">
+                <label class="field-label" for="webhookUrl">Failure webhook URL (optional)</label>
+                <input id="webhookUrl" name="url" type="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="https://discord.com/api/webhooks/...">
+                <p class="note">The server sends a message when a backup fails or only partly succeeds, so you hear about it before the next scheduled try. Works with Discord, Slack and any receiver that accepts JSON. The saved address is never shown again.</p>
+                <p class="note" data-webhook-status role="status">Checking…</p>
+              </div>
+              <div class="button-row">
+                <button type="submit">Save Webhook</button>
+                <button type="button" class="ghost" data-webhook-test>Send Test</button>
+                <button type="button" class="ghost" data-webhook-clear>Clear</button>
+              </div>
+            </form>
+          </section>
+        </div>
       </div>
-    </main>
+    </div>
   </div>
 </body>
 </html>

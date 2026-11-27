@@ -62,6 +62,7 @@ export function initConnection({ root, statusPanel, badge }, notify, { resync })
     if (busy) return null;
     notify.clear();
     busy = true;
+    const focused = root.contains(document.activeElement) ? document.activeElement : null;
     setBadge('checking', label);
     scanBar.classList.add('active');
     controls.forEach((control) => { control.disabled = true; });
@@ -74,6 +75,7 @@ export function initConnection({ root, statusPanel, badge }, notify, { resync })
     busy = false;
     scanBar.classList.remove('active');
     controls.forEach((control) => { control.disabled = false; });
+    if (focused) focused.focus();
     if (latest) render(latest);
     await resync();
     return result;

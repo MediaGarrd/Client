@@ -1,0 +1,1 @@
+[{"name":"jellyfin","paths":["/srv/jellyfin/config","/srv/jellyfin/data"]},{"name":"radarr","paths":["/srv/radarr"]}]

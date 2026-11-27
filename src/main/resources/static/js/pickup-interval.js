@@ -1,5 +1,5 @@
 import { api } from './api.js';
-import { seconds, toDuration } from './format.js';
+import { pickupProblem, seconds, toDuration } from './format.js';
 
 export function initPickupInterval(form, notify) {
   const minutes = form.elements.minutes;
@@ -10,6 +10,11 @@ export function initPickupInterval(form, notify) {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     notify.clear();
+    const problem = pickupProblem(Number(minutes.value));
+    if (problem) {
+      notify.error(new Error(problem));
+      return;
+    }
     try {
       const status = await api.updatePickupInterval(toDuration(Number(minutes.value)));
       edited = false;

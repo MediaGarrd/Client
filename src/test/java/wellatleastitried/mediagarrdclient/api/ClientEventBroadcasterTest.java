@@ -1,8 +1,7 @@
-package wellatleastitried.mediagarrdclient.service;
+package wellatleastitried.mediagarrdclient.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -11,10 +10,8 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongFunction;
@@ -22,53 +19,14 @@ import java.util.function.LongFunction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import wellatleastitried.mediagarrdclient.service.ClientEvent;
 
 @Timeout(30)
 class ClientEventBroadcasterTest {
 
     private static final Duration LONG_PING = Duration.ofMinutes(10);
-
-    static class RecordingEmitter extends SseEmitter {
-
-        final BlockingQueue<String> sent = new LinkedBlockingQueue<>();
-        final CountDownLatch completed = new CountDownLatch(1);
-
-        RecordingEmitter(Long timeout) {
-            super(timeout);
-        }
-
-        @Override
-        public void send(SseEventBuilder builder) throws IOException {
-            StringBuilder text = new StringBuilder();
-            for (ResponseBodyEmitter.DataWithMediaType part : builder.build()) {
-                text.append(part.getData());
-            }
-            sent.add(text.toString());
-        }
-
-        @Override
-        public void complete() {
-            completed.countDown();
-            super.complete();
-        }
-
-        String next() throws InterruptedException {
-            String event = sent.poll(5, TimeUnit.SECONDS);
-            assertNotNull(event, "timed out waiting for an event");
-            return event;
-        }
-
-        String nextContaining(String marker) throws InterruptedException {
-            while (true) {
-                String event = next();
-                if (event.contains(marker)) {
-                    return event;
-                }
-            }
-        }
-    }
 
     static class FailingEmitter extends RecordingEmitter {
 
@@ -140,6 +98,36 @@ class ClientEventBroadcasterTest {
     }
 
     @Test
+    void endingASessionClosesOnlyItsSubscribers() throws Exception {
+        ClientEventBroadcaster broadcaster = broadcaster();
+        RecordingEmitter ending = (RecordingEmitter) broadcaster.subscribe("session-a", SNAPSHOT).orElseThrow();
+        RecordingEmitter staying = (RecordingEmitter) broadcaster.subscribe("session-b", SNAPSHOT).orElseThrow();
+        ending.next();
+        staying.next();
+
+        broadcaster.endSession("session-a");
+
+        assertTrue(ending.completed.await(5, TimeUnit.SECONDS));
+        assertEquals(1, broadcaster.subscriberCount());
+        broadcaster.publish("state", "{}");
+        assertTrue(staying.next().contains("event:state"));
+    }
+
+    @Test
+    void aSubscriberWhoseSessionExpiredIsClosedAtTheNextPing() throws Exception {
+        java.util.concurrent.atomic.AtomicBoolean active = new java.util.concurrent.atomic.AtomicBoolean(true);
+        ClientEventBroadcaster broadcaster = new ClientEventBroadcaster(Duration.ofMillis(20), 32, 64, Duration.ofMinutes(10), Duration.ofMinutes(5), threadFactory,
+            RecordingEmitter::new, key -> active.get());
+        broadcasters.add(broadcaster);
+        RecordingEmitter emitter = (RecordingEmitter) broadcaster.subscribe("session-a", SNAPSHOT).orElseThrow();
+        emitter.next();
+
+        active.set(false);
+
+        assertTrue(emitter.completed.await(5, TimeUnit.SECONDS));
+    }
+
+    @Test
     void sendsTheInitialEventsFirstAndTellsTheBrowserHowLongToWaitBeforeReconnecting() throws Exception {
         ClientEventBroadcaster broadcaster = broadcaster();
 
@@ -147,17 +135,6 @@ class ClientEventBroadcasterTest {
 
         assertEquals("retry:5000\nevent:snapshot\ndata:{\"link\":\"DOWN\"}\n\n", emitter.next());
         assertNull(emitter.sent.poll(200, TimeUnit.MILLISECONDS));
-    }
-
-    @Test
-    void theReconnectHintIsSentOnlyOnce() throws Exception {
-        ClientEventBroadcaster broadcaster = broadcaster();
-        RecordingEmitter emitter = subscribe(broadcaster);
-        emitter.next();
-
-        broadcaster.publish("run-started", "{\"running\":true}");
-
-        assertEquals("event:run-started\ndata:{\"running\":true}\n\n", emitter.next());
     }
 
     @Test

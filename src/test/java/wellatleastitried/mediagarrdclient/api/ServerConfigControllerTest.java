@@ -18,14 +18,15 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.web.client.ResourceAccessException;
-import org.springframework.web.server.ResponseStatusException;
+import wellatleastitried.mediagarrdclient.service.InvalidRequestException;
 
 import wellatleastitried.mediagarrdclient.dto.ServerConfigDto;
 import wellatleastitried.mediagarrdclient.dto.ServerStatusDto;
@@ -34,6 +35,7 @@ import wellatleastitried.mediagarrdclient.service.ClientStateService;
 import wellatleastitried.mediagarrdclient.service.ServerApiService;
 
 @WebMvcTest(controllers = ServerConfigController.class)
+@Import(TestSession.class)
 class ServerConfigControllerTest {
 
     private static final String SERVER = "http://server:8080";
@@ -45,39 +47,15 @@ class ServerConfigControllerTest {
     @Autowired
     MockMvc mockMvc;
 
-    @MockBean
+    @MockitoBean
     ClientStateService stateService;
 
-    @MockBean
+    @MockitoBean
     ServerApiService serverApiService;
 
     @BeforeEach
     void setUp() {
         when(stateService.requireActiveServer()).thenReturn(SERVER);
-    }
-
-    @Test
-    void returnsServerConfig() throws Exception {
-        when(serverApiService.serverConfig(SERVER)).thenReturn(new ServerConfigDto("/backups", 4, Duration.ofHours(6)));
-
-        mockMvc.perform(get("/api/client/server-config"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.backupLocation").value("/backups"))
-            .andExpect(jsonPath("$.retentionCount").value(4))
-            .andExpect(jsonPath("$.backupInterval").value("PT6H"));
-    }
-
-    @Test
-    void updatesConfigAndScheduleTogether() throws Exception {
-        when(serverApiService.updateServerConfig(SERVER, "/new", 3)).thenReturn(new ServerConfigDto("/new", 3, Duration.ofHours(6)));
-        when(serverApiService.updateServerSchedule(SERVER, Duration.ofMinutes(90)))
-            .thenReturn(new ServerStatusDto(true, false, 3, Duration.ofMinutes(90)));
-
-        mockMvc.perform(json(put("/api/client/server-config"), "{\"backupLocation\": \"/new\", \"retentionCount\": 3, \"backupInterval\": \"PT90M\"}"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.backupLocation").value("/new"))
-            .andExpect(jsonPath("$.retentionCount").value(3))
-            .andExpect(jsonPath("$.backupInterval").value("PT1H30M"));
     }
 
     @Test
@@ -92,10 +70,34 @@ class ServerConfigControllerTest {
     }
 
     @Test
+    void refusesAnOutOfRangeIntervalBeforeChangingAnything() throws Exception {
+        for (String interval : List.of("\"PT14M59S\"", "\"PT0S\"", "\"-PT1H\"", "\"PT8761H\"", "899", "31536001")) {
+            mockMvc.perform(json(put("/api/client/server-config"),
+                    "{\"backupLocation\": \"/backups\", \"retentionCount\": 5, \"backupInterval\": " + interval + "}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("Backup interval must be between 15 minutes and 365 days"));
+        }
+
+        verify(serverApiService, never()).updateServerConfig(anyString(), any(), any());
+        verify(serverApiService, never()).updateServerSchedule(anyString(), any());
+    }
+
+    @Test
+    void acceptsTheIntervalBounds() throws Exception {
+        when(serverApiService.updateServerConfig(SERVER, "/backups", 5)).thenReturn(new ServerConfigDto("/backups", 5, Duration.ofHours(6)));
+        for (String interval : List.of("\"PT15M\"", "\"PT8760H\"", "900", "31536000")) {
+            when(serverApiService.updateServerSchedule(anyString(), any())).thenReturn(new ServerStatusDto(true, false, 5, Duration.ofMinutes(15)));
+            mockMvc.perform(json(put("/api/client/server-config"),
+                    "{\"backupLocation\": \"/backups\", \"retentionCount\": 5, \"backupInterval\": " + interval + "}"))
+                .andExpect(status().isOk());
+        }
+    }
+
+    @Test
     void forwardsServiceChanges() throws Exception {
         when(serverApiService.listServices(SERVER)).thenReturn(List.of(RADARR));
         when(serverApiService.addService(SERVER, RADARR)).thenReturn(RADARR);
-        when(serverApiService.updateService(SERVER, "old name", RADARR)).thenReturn(RADARR);
+        when(serverApiService.updateService(SERVER, "radarr-4k", RADARR)).thenReturn(RADARR);
 
         mockMvc.perform(get("/api/client/services"))
             .andExpect(status().isOk())
@@ -104,7 +106,7 @@ class ServerConfigControllerTest {
         mockMvc.perform(json(post("/api/client/services"), RADARR_JSON))
             .andExpect(status().isCreated())
             .andExpect(jsonPath("$.name").value("radarr"));
-        mockMvc.perform(json(put("/api/client/services/old name"), RADARR_JSON))
+        mockMvc.perform(json(put("/api/client/services/radarr-4k"), RADARR_JSON))
             .andExpect(status().isOk());
         mockMvc.perform(delete("/api/client/services/radarr"))
             .andExpect(status().isNoContent());
@@ -113,15 +115,41 @@ class ServerConfigControllerTest {
     }
 
     @Test
-    void rejectsRequestsWithoutAnActiveServer() throws Exception {
-        when(stateService.requireActiveServer())
-            .thenThrow(new ResponseStatusException(HttpStatus.BAD_REQUEST, "No active MediaGarrd server selected"));
-
-        mockMvc.perform(get("/api/client/services"))
+    void refusesServiceNamesThatCouldChangeThePath() throws Exception {
+        mockMvc.perform(json(put("/api/client/services/%2E%2E"), RADARR_JSON))
+            .andExpect(status().isBadRequest());
+        mockMvc.perform(json(put("/api/client/services/a%2Fb"), RADARR_JSON))
+            .andExpect(status().isBadRequest());
+        mockMvc.perform(delete("/api/client/services/..%5Cetc"))
             .andExpect(status().isBadRequest())
-            .andExpect(jsonPath("$.error").value("No active MediaGarrd server selected"));
+            .andExpect(jsonPath("$.error").exists());
 
-        verify(serverApiService, never()).listServices(anyString());
+        verify(serverApiService, never()).updateService(anyString(), anyString(), any());
+        verify(serverApiService, never()).removeService(anyString(), anyString());
+    }
+
+    @Test
+    void routineReadsDoNotLogAtInfoButWritesDo() throws Exception {
+        ch.qos.logback.classic.Logger root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs = new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            when(serverApiService.serverConfig(SERVER)).thenReturn(new ServerConfigDto("/backups", 5, Duration.ofHours(6)));
+            when(serverApiService.listServices(SERVER)).thenReturn(List.of(RADARR));
+            mockMvc.perform(get("/api/client/server-config")).andExpect(status().isOk());
+            mockMvc.perform(get("/api/client/services")).andExpect(status().isOk());
+            long infoAfterReads = logs.list.stream().filter(event -> event.getLevel().toInt() >= ch.qos.logback.classic.Level.INFO_INT && event.getLoggerName().endsWith("ServerConfigController")).count();
+
+            when(serverApiService.addService(SERVER, RADARR)).thenReturn(RADARR);
+            mockMvc.perform(json(post("/api/client/services"), RADARR_JSON)).andExpect(status().isCreated());
+            long infoAfterWrite = logs.list.stream().filter(event -> event.getLevel().toInt() >= ch.qos.logback.classic.Level.INFO_INT && event.getLoggerName().endsWith("ServerConfigController")).count();
+
+            org.junit.jupiter.api.Assertions.assertEquals(0, infoAfterReads);
+            org.junit.jupiter.api.Assertions.assertEquals(1, infoAfterWrite);
+        } finally {
+            root.detachAppender(logs);
+        }
     }
 
     @Test

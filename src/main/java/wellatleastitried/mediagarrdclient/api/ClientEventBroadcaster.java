@@ -1,4 +1,4 @@
-package wellatleastitried.mediagarrdclient.service;
+package wellatleastitried.mediagarrdclient.api;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -12,6 +12,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongFunction;
+import java.util.function.Predicate;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,11 +20,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-
 import jakarta.annotation.PreDestroy;
+import wellatleastitried.mediagarrdclient.service.ClientEvent;
+import wellatleastitried.mediagarrdclient.service.ClientEventPublisher;
+import wellatleastitried.mediagarrdclient.service.SessionService;
 
 @Service
-public class ClientEventBroadcaster {
+public class ClientEventBroadcaster implements ClientEventPublisher {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ClientEventBroadcaster.class);
     private static final Duration PING_INTERVAL = Duration.ofSeconds(20);
@@ -40,11 +43,13 @@ public class ClientEventBroadcaster {
     private final class Subscriber {
 
         private final SseEmitter emitter;
+        private final String sessionKey;
         private final BlockingQueue<ClientEvent> queue = new LinkedBlockingQueue<>(queueCapacity);
         private volatile boolean closed;
 
-        private Subscriber(SseEmitter emitter) {
+        private Subscriber(SseEmitter emitter, String sessionKey) {
             this.emitter = emitter;
+            this.sessionKey = sessionKey;
         }
 
         private boolean offer(ClientEvent message) {
@@ -70,7 +75,7 @@ public class ClientEventBroadcaster {
                     if (closed || polled == CLOSE) {
                         break;
                     }
-                    if (polled == null && System.nanoTime() >= deadline) {
+                    if (polled == null && (System.nanoTime() >= deadline || sessionKey != null && !sessionActive.test(sessionKey))) {
                         break;
                     }
                     ClientEvent message = polled == null ? PING : polled;
@@ -106,13 +111,15 @@ public class ClientEventBroadcaster {
     private final long emitterTimeoutMillis;
     private final ThreadFactory threadFactory;
     private final LongFunction<SseEmitter> emitterFactory;
+    private final Predicate<String> sessionActive;
     private final Object lock = new Object();
     private final List<Subscriber> subscribers = new ArrayList<>();
     private boolean shutdown;
 
     @Autowired
-    public ClientEventBroadcaster() {
-        this(PING_INTERVAL, MAX_SUBSCRIBERS, QUEUE_CAPACITY, STREAM_LIFETIME, EMITTER_TIMEOUT, writerThreads(), SseEmitter::new);
+    public ClientEventBroadcaster(SessionService sessions) {
+        this(PING_INTERVAL, MAX_SUBSCRIBERS, QUEUE_CAPACITY, STREAM_LIFETIME, EMITTER_TIMEOUT, writerThreads(), SseEmitter::new, sessions::isActive);
+        sessions.addEndedListener(this::endSession);
     }
 
     ClientEventBroadcaster(
@@ -124,6 +131,20 @@ public class ClientEventBroadcaster {
         ThreadFactory threadFactory,
         LongFunction<SseEmitter> emitterFactory
     ) {
+        this(pingInterval, maxSubscribers, queueCapacity, streamLifetime, emitterTimeout, threadFactory, emitterFactory, key -> true);
+    }
+
+    ClientEventBroadcaster(
+        Duration pingInterval,
+        int maxSubscribers,
+        int queueCapacity,
+        Duration streamLifetime,
+        Duration emitterTimeout,
+        ThreadFactory threadFactory,
+        LongFunction<SseEmitter> emitterFactory,
+        Predicate<String> sessionActive
+    ) {
+        this.sessionActive = sessionActive;
         this.pingInterval = pingInterval;
         this.maxSubscribers = maxSubscribers;
         this.queueCapacity = queueCapacity;
@@ -139,8 +160,12 @@ public class ClientEventBroadcaster {
     }
 
     public Optional<SseEmitter> subscribe(List<ClientEvent> initial) {
+        return subscribe(null, initial);
+    }
+
+    public Optional<SseEmitter> subscribe(String sessionKey, List<ClientEvent> initial) {
         SseEmitter emitter = emitterFactory.apply(emitterTimeoutMillis);
-        Subscriber subscriber = new Subscriber(emitter);
+        Subscriber subscriber = new Subscriber(emitter, sessionKey);
         Thread writer = threadFactory.newThread(subscriber::run);
         synchronized (lock) {
             if (shutdown || subscribers.size() >= maxSubscribers) {
@@ -156,9 +181,22 @@ public class ClientEventBroadcaster {
         return Optional.of(emitter);
     }
 
+    @Override
     public void publish(String name, String data) {
         synchronized (lock) {
             broadcast(new ClientEvent(name, data));
+        }
+    }
+
+    void endSession(String sessionKey) {
+        synchronized (lock) {
+            subscribers.removeIf(subscriber -> {
+                boolean ends = sessionKey.equals(subscriber.sessionKey);
+                if (ends) {
+                    subscriber.close();
+                }
+                return ends;
+            });
         }
     }
 

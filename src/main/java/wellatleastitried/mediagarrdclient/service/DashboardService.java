@@ -8,10 +8,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.slf4j.Logger;
@@ -19,17 +21,15 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import wellatleastitried.mediagarrdclient.dto.BackupDto;
 import wellatleastitried.mediagarrdclient.dto.DashboardState;
 import wellatleastitried.mediagarrdclient.dto.HealthSummary;
 import wellatleastitried.mediagarrdclient.dto.LinkState;
+import wellatleastitried.mediagarrdclient.dto.PairingState;
 import wellatleastitried.mediagarrdclient.dto.ServerStatusDto;
 
 @Service
@@ -39,82 +39,30 @@ public class DashboardService {
     private static final Duration POLL_INTERVAL = Duration.ofSeconds(7);
     private static final Duration CATCH_ALL_INTERVAL = Duration.ofSeconds(60);
 
-    private final class Refresh {
-
-        private final Runnable work;
-        private boolean inFlight;
-        private boolean again;
-
-        private Refresh(Runnable work) {
-            this.work = work;
-        }
-
-        private void request() {
-            synchronized (lock) {
-                if (inFlight) {
-                    again = true;
-                    return;
-                }
-                inFlight = true;
-            }
-            try {
-                executor.execute(this::loop);
-            } catch (RejectedExecutionException e) {
-                synchronized (lock) {
-                    inFlight = false;
-                }
-            }
-        }
-
-        private void loop() {
-            boolean repeat;
-            do {
-                try {
-                    work.run();
-                } catch (RuntimeException e) {
-                    LOGGER.warn("Dashboard refresh failed: {}", e.getMessage());
-                }
-                synchronized (lock) {
-                    repeat = again;
-                    again = false;
-                    if (!repeat) {
-                        inFlight = false;
-                    }
-                }
-            } while (repeat);
-        }
-
-        private boolean busy() {
-            return inFlight;
-        }
-    }
-
     private final ClientStateService stateService;
-    private final ClientEventBroadcaster broadcaster;
-    private final ServerApiService serverApiService;
     private final VersionService versionService;
     private final UpdateCheckService updateCheckService;
-    private final ObjectMapper mapper;
+    private final ServerApiService serverApiService;
     private final Executor executor;
     private final Clock clock;
     private final Object lock = new Object();
-    private final Refresh healthRefresh = new Refresh(this::fetchHealth);
-    private final Refresh versionRefresh = new Refresh(this::fetchVersion);
-    private final Refresh backupsRefresh = new Refresh(this::fetchBackups);
+    private final List<Consumer<String>> recoveryListeners = new CopyOnWriteArrayList<>();
+    private final DashboardEvents events;
+    private final PairingStatus pairingStatus;
+    private final LinkStateMachine links;
+    private final BackupWatcher backups;
+    private final CoalescedRefresh healthRefresh;
+    private final CoalescedRefresh versionRefresh;
     private String activeServer;
     private List<String> knownServers = List.of();
-    private LinkState link = LinkState.DOWN;
-    private Boolean running;
     private HealthSummary health;
     private Instant healthFetchedAt;
-    private List<BackupDto> backupsSeen;
-    private Instant backupsCheckedAt;
     private long epoch;
 
     @Autowired
     public DashboardService(
         ClientStateService stateService,
-        ClientEventBroadcaster broadcaster,
+        ClientEventPublisher broadcaster,
         ServerApiService serverApiService,
         VersionService versionService,
         UpdateCheckService updateCheckService,
@@ -125,7 +73,7 @@ public class DashboardService {
 
     DashboardService(
         ClientStateService stateService,
-        ClientEventBroadcaster broadcaster,
+        ClientEventPublisher broadcaster,
         ServerApiService serverApiService,
         VersionService versionService,
         UpdateCheckService updateCheckService,
@@ -134,13 +82,17 @@ public class DashboardService {
         Clock clock
     ) {
         this.stateService = stateService;
-        this.broadcaster = broadcaster;
         this.serverApiService = serverApiService;
         this.versionService = versionService;
         this.updateCheckService = updateCheckService;
-        this.mapper = mapper;
         this.executor = executor;
         this.clock = clock;
+        this.events = new DashboardEvents(broadcaster, mapper);
+        this.pairingStatus = new PairingStatus(stateService, events);
+        this.links = new LinkStateMachine(events, clock);
+        this.backups = new BackupWatcher(serverApiService, events, clock, lock, executor, CATCH_ALL_INTERVAL, () -> activeServer, () -> epoch, () -> links.link() == LinkState.DEGRADED);
+        this.healthRefresh = new CoalescedRefresh(lock, executor, this::fetchHealth);
+        this.versionRefresh = new CoalescedRefresh(lock, executor, this::fetchVersion);
     }
 
     private static ExecutorService refreshThreads() {
@@ -151,6 +103,9 @@ public class DashboardService {
     @PostConstruct
     void start() {
         stateService.addKnownServersListener(this::sync);
+        stateService.addActiveServerListener(ignored -> sync());
+        stateService.addPairingListener(this::pairingChanged);
+        serverApiService.addTokenRejectedListener(this::pairingRejected);
         updateCheckService.addStatusListener(ignored -> publishVersions());
         sync();
     }
@@ -168,35 +123,55 @@ public class DashboardService {
         }
     }
 
-    public Optional<SseEmitter> subscribe() {
+    public <T> Optional<T> subscribe(Function<List<ClientEvent>, Optional<T>> registration) {
         synchronized (lock) {
-            return broadcaster.subscribe(List.of(new ClientEvent("snapshot", json(snapshot()))));
+            return registration.apply(List.of(new ClientEvent("snapshot", events.json(snapshot()))));
         }
     }
 
     void sync() {
         synchronized (lock) {
-            String active = normalize(stateService.getActiveServer());
+            String active = ServerUrls.nullIfBlank(stateService.getActiveServer());
             List<String> known = stateService.getKnownServers();
             if (!Objects.equals(active, activeServer)) {
-                activeServer = active;
                 knownServers = known;
-                link = active == null ? LinkState.DOWN : LinkState.CONNECTING;
-                running = null;
-                health = null;
-                healthFetchedAt = null;
-                backupsSeen = null;
-                backupsCheckedAt = null;
-                epoch++;
-                versionService.select(active);
-                broadcaster.publish("snapshot", json(snapshot()));
-                if (active != null) {
-                    healthRefresh.request();
-                }
+                reset(active);
             } else if (!known.equals(knownServers)) {
                 knownServers = known;
                 publishServers();
             }
+        }
+    }
+
+    private void reset(String active) {
+        activeServer = active;
+        links.reset(active != null);
+        health = null;
+        healthFetchedAt = null;
+        backups.forget();
+        pairingStatus.clear();
+        epoch++;
+        versionService.select(active);
+        events.publish("snapshot", snapshot());
+        if (active != null) {
+            healthRefresh.request();
+        }
+    }
+
+    void pairingChanged(String server) {
+        synchronized (lock) {
+            if (Objects.equals(ServerUrls.nullIfBlank(server), activeServer)) {
+                reset(activeServer);
+            }
+        }
+    }
+
+    void pairingRejected(String server) {
+        synchronized (lock) {
+            if (!Objects.equals(server, activeServer)) {
+                return;
+            }
+            pairingStatus.reject(activeServer);
         }
     }
 
@@ -205,7 +180,7 @@ public class DashboardService {
             if (!Objects.equals(server, activeServer)) {
                 return;
             }
-            boolean wasDown = link == LinkState.DOWN;
+            boolean wasDown = links.link() == LinkState.DOWN;
             setLink(LinkState.LIVE);
             healthRefresh.request();
             if (versionService.invalidate(wasDown)) {
@@ -229,15 +204,15 @@ public class DashboardService {
             if (!Objects.equals(server, activeServer)) {
                 return;
             }
-            running = runningNow;
-            broadcaster.publish(name, data);
+            links.setRunning(runningNow);
+            events.publishRaw(name, data);
         }
     }
 
     void backupsChanged(String server, String data) {
         synchronized (lock) {
             if (Objects.equals(server, activeServer)) {
-                broadcaster.publish("backups-changed", data);
+                events.publishRaw("backups-changed", data);
             }
         }
     }
@@ -256,18 +231,22 @@ public class DashboardService {
             if (activeServer == null) {
                 return;
             }
-            Duration limit = link == LinkState.LIVE ? CATCH_ALL_INTERVAL : POLL_INTERVAL;
+            Duration limit = links.link() == LinkState.LIVE ? CATCH_ALL_INTERVAL : POLL_INTERVAL;
             boolean due = healthFetchedAt == null || Duration.between(healthFetchedAt, clock.instant()).compareTo(limit) >= 0;
             if (due && !healthRefresh.busy()) {
                 healthRefresh.request();
             }
-            if (reachable() && !versionRefresh.busy() && versionService.needsRefresh()) {
+            if (links.reachable() && !versionRefresh.busy() && versionService.needsRefresh()) {
                 versionRefresh.request();
             }
-            if (link == LinkState.DEGRADED && !backupsRefresh.busy() && (backupsCheckedAt == null || Duration.between(backupsCheckedAt, clock.instant()).compareTo(CATCH_ALL_INTERVAL) >= 0)) {
-                backupsRefresh.request();
+            if (links.link() == LinkState.DEGRADED) {
+                backups.requestWhenDue();
             }
         }
+    }
+
+    public void addRecoveryListener(Consumer<String> listener) {
+        recoveryListeners.add(listener);
     }
 
     private void fetchHealth() {
@@ -281,80 +260,68 @@ public class DashboardService {
             return;
         }
         ServerStatusDto status = null;
+        boolean tokenRejected = false;
         try {
             status = serverApiService.health(server);
+        } catch (PairingRequiredException e) {
+            tokenRejected = true;
+            status = new ServerStatusDto(true, false, 0, null);
         } catch (RuntimeException e) {
             LOGGER.debug("{} did not answer the health check: {}", server, e.getMessage());
         }
-        applyHealth(expected, status);
+        applyHealth(expected, status, tokenRejected);
     }
 
-    private void applyHealth(long expected, ServerStatusDto status) {
+    private void applyHealth(long expected, ServerStatusDto status, boolean tokenRejected) {
+        String cleared;
         synchronized (lock) {
-            if (expected != epoch) {
-                return;
+            cleared = applyHealthLocked(expected, status, tokenRejected);
+        }
+        if (cleared != null) {
+            for (Consumer<String> listener : recoveryListeners) {
+                listener.accept(cleared);
             }
-            healthFetchedAt = clock.instant();
-            if (status == null) {
-                if (link != LinkState.LIVE) {
-                    setLink(LinkState.DOWN);
-                    if (versionService.markUnreachable()) {
-                        broadcaster.publish("versions", json(versionService.versions()));
-                    }
+        }
+    }
+
+    private String applyHealthLocked(long expected, ServerStatusDto status, boolean tokenRejected) {
+        String cleared = null;
+        if (expected != epoch) {
+            return null;
+        }
+        healthFetchedAt = clock.instant();
+        if (status != null && pairingStatus.observe(tokenRejected, activeServer)) {
+            cleared = activeServer;
+        }
+        boolean detailed = status != null && pairingStatus.of(activeServer) == PairingState.PAIRED;
+        if (status == null) {
+            if (links.link() != LinkState.LIVE) {
+                setLink(LinkState.DOWN);
+                if (versionService.markUnreachable()) {
+                    events.publish("versions", versionService.versions());
                 }
-                return;
             }
+            return cleared;
+        }
+        if (detailed) {
             HealthSummary summary = new HealthSummary(status.backupInterval(), status.backupRetentionCount());
             if (!summary.equals(health)) {
                 health = summary;
-                broadcaster.publish("config", json(summary));
-            }
-            if (link != LinkState.LIVE) {
-                boolean recovered = link != LinkState.DEGRADED;
-                boolean wasDown = link == LinkState.DOWN;
-                setLink(LinkState.DEGRADED);
-                setPolledRunning(status.running());
-                if (recovered && versionService.invalidate(wasDown)) {
-                    versionRefresh.request();
-                }
+                events.publish("config", summary);
             }
         }
-    }
-
-    private void fetchBackups() {
-        String server;
-        long expected;
-        synchronized (lock) {
-            server = activeServer;
-            expected = epoch;
-        }
-        if (server == null) {
-            return;
-        }
-        List<BackupDto> listed;
-        try {
-            listed = serverApiService.listBackups(server);
-        } catch (RuntimeException e) {
-            LOGGER.debug("{} did not list its backups: {}", server, e.getMessage());
-            listed = null;
-        }
-        synchronized (lock) {
-            if (expected != epoch || link != LinkState.DEGRADED) {
-                return;
+        if (links.link() != LinkState.LIVE) {
+            boolean recovered = links.link() != LinkState.DEGRADED;
+            boolean wasDown = links.link() == LinkState.DOWN;
+            setLink(LinkState.DEGRADED);
+            if (detailed && links.setPolledRunning(status.running())) {
+                backups.forgetListing();
             }
-            backupsCheckedAt = clock.instant();
-            if (listed == null) {
-                return;
+            if (recovered && versionService.invalidate(wasDown)) {
+                versionRefresh.request();
             }
-            if (backupsSeen != null && !listed.equals(backupsSeen)) {
-                broadcaster.publish("backups-changed", json(Map.of("at", clock.instant().toString())));
-            }
-            backupsSeen = listed;
         }
-    }
-
-    private boolean reachable() {
-        return link == LinkState.LIVE || link == LinkState.DEGRADED;
+        return cleared;
     }
 
     private void fetchVersion() {
@@ -365,7 +332,7 @@ public class DashboardService {
 
     private void publishVersions() {
         synchronized (lock) {
-            broadcaster.publish("versions", json(versionService.versions()));
+            events.publish("versions", versionService.versions());
         }
     }
 
@@ -373,54 +340,16 @@ public class DashboardService {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("knownServers", knownServers);
         payload.put("activeServer", activeServer);
-        broadcaster.publish("servers", json(payload));
+        events.publish("servers", payload);
     }
 
     private void setLink(LinkState next) {
-        if (link == next) {
-            return;
+        if (links.setLink(next, activeServer) && next != LinkState.DEGRADED) {
+            backups.forget();
         }
-        link = next;
-        if (!reachable()) {
-            running = null;
-        }
-        if (next != LinkState.DEGRADED) {
-            backupsSeen = null;
-            backupsCheckedAt = null;
-        }
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("server", activeServer == null ? "" : activeServer);
-        payload.put("state", next);
-        broadcaster.publish("link", json(payload));
-    }
-
-    private void setPolledRunning(boolean polled) {
-        if (Boolean.valueOf(polled).equals(running)) {
-            return;
-        }
-        if (Boolean.TRUE.equals(running) && !polled) {
-            backupsSeen = null;
-        }
-        running = polled;
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("running", polled);
-        payload.put("at", clock.instant().toString());
-        broadcaster.publish("state", json(payload));
     }
 
     private DashboardState snapshot() {
-        return new DashboardState(activeServer, knownServers, link, running, health, versionService.versions());
-    }
-
-    private String json(Object payload) {
-        try {
-            return mapper.writeValueAsString(payload);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
-    private static String normalize(String url) {
-        return url == null || url.isBlank() ? null : url;
+        return new DashboardState(activeServer, knownServers, links.link(), links.running(), health, versionService.versions(), pairingStatus.of(activeServer));
     }
 }

@@ -5,7 +5,7 @@ import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties(prefix = "mediagarrd.client")
-public class Configuration {
+public class MediaGarrdProperties {
 
     private String stateFile = "/var/lib/mediagarrd/client/state.json";
     private String downloadDirectory = "/var/lib/mediagarrd/downloads";
@@ -16,6 +16,9 @@ public class Configuration {
     private String githubApiBaseUrl = "https://api.github.com";
     private Duration updateCheckInterval = Duration.ofHours(24);
     private Duration backupRunTimeout = Duration.ofHours(6);
+    private String serverCa = "";
+    private String password = "";
+    private boolean resetPassword;
 
     public String getStateFile() {
         return stateFile;
@@ -87,5 +90,29 @@ public class Configuration {
 
     public void setBackupRunTimeout(Duration backupRunTimeout) {
         this.backupRunTimeout = backupRunTimeout;
+    }
+
+    public String getServerCa() {
+        return serverCa;
+    }
+
+    public void setServerCa(String serverCa) {
+        this.serverCa = serverCa;
+    }
+
+    public String getPassword() {
+        return password;
+    }
+
+    public void setPassword(String password) {
+        this.password = password;
+    }
+
+    public boolean isResetPassword() {
+        return resetPassword;
+    }
+
+    public void setResetPassword(boolean resetPassword) {
+        this.resetPassword = resetPassword;
     }
 }
