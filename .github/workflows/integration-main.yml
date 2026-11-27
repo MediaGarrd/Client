@@ -1,0 +1,16 @@
+name: Integration Test Main Branch with Server
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: MediaGarrd/MediaGarrd-Stack-Testing@main
+        with:
+          server-branch: main
+          client-branch: main

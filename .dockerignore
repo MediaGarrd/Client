@@ -1,4 +1,12 @@
 .git
+.jj
+.claude
+.env
+ref
+bin
+.settings
+.classpath
+.project
 .github
 .vscode
 build
@@ -14,7 +22,6 @@ secrets
 .gitignore
 LICENSE
 README.md
-install-util.sh
-install.sh
 CHANGELOG
-docker-compose.yml.example
+docker-compose.yml
+docker-compose.example.yml
